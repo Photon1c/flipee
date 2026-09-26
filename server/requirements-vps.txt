@@ -1,0 +1,6 @@
+# For a production/VPS deployment only (see the module docstring in
+# flipee_relay.py) — gunicorn doesn't support Windows, so this is kept out
+# of requirements.txt to not break local/same-LAN testing on a Windows dev
+# machine. On the VPS: pip install -r requirements.txt -r requirements-vps.txt
+-r requirements.txt
+gunicorn
