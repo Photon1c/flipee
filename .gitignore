@@ -1,18 +1,30 @@
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
+# Python (server/)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
 
-# Other files and folders
-.settings/
+# Local / generated
+.env
+*.md.bak
 
-# Executables
-*.swf
-*.air
-*.ipa
-*.apk
+# Arduino
+*.hex
+*.bin
+build/
 
-# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
-# should NOT be excluded as they contain compiler settings and other important
-# information for Eclipse / Flash Builder.
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local credentials — real values only, never committed.
+# Copy Flipee/secrets.example.h to Flipee/secrets.h and fill it in.
+Flipee/secrets.h
+
+# Claude Code local machine settings
+.claude/settings.local.json
