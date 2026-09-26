@@ -161,7 +161,18 @@ const char* SERVER_HOST = SERVER_HOST_VAL;
 const int SERVER_PORT = 5024;
 const bool RELAY_USE_TLS = false;  // Local LAN, no TLS
 const char* RELAY_KEY = RELAY_KEY_VAL;
-const uint32_t RELAY_TIMEOUT_MS = 2500;
+// Two different waits, and collapsing them into one number is why a
+// perfectly healthy relay used to fail every single time:
+//   CONNECT — is anything listening at all? A relay that isn't there
+//     should fail fast; that's what keeps the gesture responsive out in
+//     the wild, where usually nothing is listening.
+//   READ — the relay has answered, and is now round-tripping an LLM call.
+//     Measured at 3.4-4.0s on loopback alone, before any WiFi hop. The old
+//     shared 2500ms budget expired mid-generation on every flip, which
+//     reads as "relay is down" and silently produced a templated
+//     reflection instead.
+const uint32_t RELAY_CONNECT_TIMEOUT_MS = 2500;
+const uint32_t RELAY_TIMEOUT_MS         = 15000;
 
 // --- microSD journal (NOT verified against this board — confirm first) ---
 const bool ENABLE_SD = true;
@@ -402,7 +413,7 @@ bool tryRelayReflection(String &outText) {
   http.addHeader("Content-Type", "application/json");
   if (strlen(RELAY_KEY) > 0) http.addHeader("X-Flipee-Key", RELAY_KEY);
   http.setTimeout(RELAY_TIMEOUT_MS);
-  http.setConnectTimeout(RELAY_TIMEOUT_MS);
+  http.setConnectTimeout(RELAY_CONNECT_TIMEOUT_MS);
 
   JsonDocument doc;
   doc["city"] = city;
@@ -865,7 +876,10 @@ void drawReflecting() {
   gfx->setTextColor(theme.accent);
   gfx->setTextSize(2);
   int16_t x1, y1; uint16_t w, h;
-  const char *msg = "(o_O)! writing to sd card...";
+  // Says "reflecting" rather than "writing to sd card" because the long
+  // part of this is the relay round-trip (up to RELAY_TIMEOUT_MS), not the
+  // write — and on a build with no SD wired up, there is no write at all.
+  const char *msg = "(o_O)! reflecting...";
   gfx->getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
   gfx->setCursor((LCD_WIDTH - (int)w) / 2, LCD_HEIGHT / 2 - (int)h / 2);
   gfx->println(msg);
