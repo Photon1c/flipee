@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Flipee — sign in{% endblock %}
+{% block body %}
+<header class="top">
+  <h1>Flipee</h1>
+  <span class="count">reflection archive</span>
+</header>
+
+<form method="post" class="login">
+  <p class="dim">
+    This is a log of where a small device has been and when. It wants the
+    password from <code>FLIPEE_DASHBOARD_KEY</code>.
+  </p>
+  <!-- type=password rather than text: this is the same value that sits in
+       the server's .env, and it shouldn't end up in a screen recording. -->
+  <input type="password" name="key" autocomplete="current-password"
+         placeholder="dashboard key" autofocus required>
+  <button type="submit">Sign in</button>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+</form>
+
+<style>
+  .login { max-width: 420px; }
+  .login input { width: 100%; margin-bottom: 10px; }
+  .login button { width: 100%; }
+  .login .error { color: #e2683f; margin-top: 12px; }
+  code { color: var(--fg); }
+</style>
+{% endblock %}
