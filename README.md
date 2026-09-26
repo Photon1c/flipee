@@ -132,16 +132,23 @@ open network Flipee forages elsewhere won't reach a laptop on your LAN.
 
 On Windows, binding the port isn't enough: the firewall blocks inbound
 connections by default, so Flipee's POST is dropped before Flask sees it
-and you get a templated reflection with no indication why. Run this once
-(it self-elevates):
-
-```
-powershell -ExecutionPolicy Bypass -File server\allow-relay-firewall.ps1
-```
+and you get a templated reflection with no indication why. Fix it once by
+**right-clicking `server\allow-relay-firewall.cmd` and choosing "Run as
+administrator"**.
 
 It adds a single inbound TCP 5024 rule scoped to the **Private** profile
-and the local subnet, so it never applies on a public network. Undo it
-with the same script and `-Remove`.
+and the local subnet, so it never applies on a public network. Run it
+again with `remove` to undo.
+
+Use the `.cmd`, not the `.ps1` directly — `.ps1` files have no "Run as
+administrator" in their right-click menu, so the PowerShell script has to
+elevate itself into a *second* window that disappears on any error. The
+`.cmd` elevates first and keeps everything in one window you can read.
+Verify it worked with:
+
+```
+Get-NetFirewallRule -DisplayName "Flipee relay (TCP 5024)"
+```
 
 To confirm the relay is actually being reached rather than silently
 falling back, flip Flipee and watch the serial monitor:
