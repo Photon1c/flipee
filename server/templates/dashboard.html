@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Flipee — reflections{% endblock %}
+{% block body %}
+
+<header class="top">
+  <h1><a href="{{ url_for('dashboard') }}">Flipee</a></h1>
+  {% if single %}
+    <span class="count">one reflection</span>
+  {% else %}
+    <span class="count">{{ total }} reflection{{ '' if total == 1 else 's' }}{% if filters.device_id or filters.day or filters.place %} matching{% endif %}</span>
+  {% endif %}
+  <span class="spacer"></span>
+  <form method="post" action="{{ url_for('logout') }}"><button type="submit">Sign out</button></form>
+</header>
+
+{% if single %}
+  <p><a href="{{ url_for('dashboard') }}">&larr; all reflections</a></p>
+{% else %}
+  <!-- Plain GET form: every filter state is a shareable URL, and the
+       browser's back button works without any history juggling. -->
+  <form method="get" class="filters">
+    <select name="device">
+      <option value="">every device</option>
+      {% for d in devices %}
+        <option value="{{ d.device_id }}" {% if d.device_id == filters.device_id %}selected{% endif %}>
+          {{ d.device_name or d.device_id }} ({{ d.entries }})
+        </option>
+      {% endfor %}
+    </select>
+    <select name="day">
+      <option value="">any day</option>
+      {% for d in days %}
+        <option value="{{ d }}" {% if d == filters.day %}selected{% endif %}>{{ d }}</option>
+      {% endfor %}
+    </select>
+    <input type="search" name="q" value="{{ filters.place }}" placeholder="city, country, or network">
+    <button type="submit">Filter</button>
+    {% if filters.device_id or filters.day or filters.place %}
+      <a class="clear" href="{{ url_for('dashboard') }}">clear</a>
+    {% endif %}
+  </form>
+{% endif %}
+
+{% if not entries %}
+  <p class="empty dim">
+    {% if filters.device_id or filters.day or filters.place %}
+      Nothing matches those filters.
+    {% else %}
+      No reflections yet. Flip the device (or POST to /reflect) and they'll
+      land here.
+    {% endif %}
+  </p>
+{% endif %}
+
+{% for e in entries %}
+  <article class="entry">
+    <div class="meta">
+      <a class="when" href="{{ url_for('entry', entry_id=e.id) }}">
+        <time datetime="{{ e.created_utc }}" data-utc="{{ e.created_utc }}">{{ e.created_utc }}</time>
+      </a>
+      <span class="where">{{ e.location }}</span>
+      {% if e.ssid %}<span class="dim">via {{ e.ssid }}</span>{% endif %}
+      {% if e.battery_pct is not none %}<span class="dim">{{ e.battery_pct }}%</span>{% endif %}
+      <span class="dim device">{{ e.device_name or e.device_id }}</span>
+    </div>
+    <div class="text">{{ e.text }}</div>
+    {% if e.headlines %}
+      <details>
+        <summary class="dim">{{ e.headlines|length }} headline{{ '' if e.headlines|length == 1 else 's' }} it was reacting to</summary>
+        <ul>{% for h in e.headlines %}<li>{{ h }}</li>{% endfor %}</ul>
+      </details>
+    {% endif %}
+  </article>
+{% endfor %}
+
+{% if not single and total > page_size %}
+  <nav class="pager">
+    {% if filters.page > 1 %}
+      <a href="{{ url_for('dashboard', device=filters.device_id or None, day=filters.day or None, q=filters.place or None, page=filters.page - 1) }}">&larr; newer</a>
+    {% endif %}
+    <span class="dim">page {{ filters.page }} of {{ (total + page_size - 1) // page_size }}</span>
+    {% if filters.page * page_size < total %}
+      <a href="{{ url_for('dashboard', device=filters.device_id or None, day=filters.day or None, q=filters.place or None, page=filters.page + 1) }}">older &rarr;</a>
+    {% endif %}
+  </nav>
+{% endif %}
+
+<style>
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 24px; }
+  .filters input[type=search] { flex: 1; min-width: 180px; }
+  .filters .clear { font-size: 13px; }
+  .empty { margin: 48px 0; }
+  .entry { border-left: 2px solid var(--line); padding: 0 0 4px 16px; margin: 0 0 32px; }
+  .entry .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; margin-bottom: 10px; }
+  .entry .when { color: var(--fg); }
+  .entry .where { color: var(--text); }
+  .entry .device { margin-left: auto; }
+  /* pre-wrap, not markdown: the relay asks Claude for plain prose and the
+     device adds its own structure around it, so there's nothing to render
+     — but paragraph breaks still matter. */
+  .entry .text { white-space: pre-wrap; }
+  .entry details { margin-top: 12px; font-size: 13px; }
+  .entry summary { cursor: pointer; }
+  .entry details ul { margin: 8px 0 0; padding-left: 20px; color: var(--dim); }
+  .pager { display: flex; gap: 16px; align-items: center; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<script>
+  // Timestamps are stored and served in UTC — correct, but not what you
+  // want to read. Convert in the browser, which is the only thing here
+  // that knows the reader's timezone.
+  for (const el of document.querySelectorAll("time[data-utc]")) {
+    const d = new Date(el.dataset.utc);
+    if (!isNaN(d)) {
+      el.textContent = d.toLocaleString(undefined, {
+        weekday: "short", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit",
+      });
+      el.title = el.dataset.utc + " (UTC)";
+    }
+  }
+</script>
+{% endblock %}

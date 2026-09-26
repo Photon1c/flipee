@@ -173,6 +173,11 @@ const char* RELAY_KEY = RELAY_KEY_VAL;
 //     reflection instead.
 const uint32_t RELAY_CONNECT_TIMEOUT_MS = 2500;
 const uint32_t RELAY_TIMEOUT_MS         = 15000;
+// Optional friendly name for this board, shown in the relay's dashboard
+// instead of its auto-generated id (see deviceId() below). Worth setting
+// the day there's a second Flipee — "flipee-3fa91c" is stable but tells
+// you nothing about which one it is.
+const char* DEVICE_NAME = "";
 
 // --- microSD journal (NOT verified against this board — confirm first) ---
 const bool ENABLE_SD = true;
@@ -395,6 +400,19 @@ String templatedReflection() {
   return String(buf);
 }
 
+// A stable identity for this board, so the relay's archive can tell two
+// Flipees apart. Derived from the factory MAC burned into efuse, which
+// means it survives reflashing and doesn't need to be stored anywhere.
+// The byte order isn't the canonical MAC order — it doesn't need to be,
+// this is a fingerprint rather than an address.
+String deviceId() {
+  uint64_t mac = ESP.getEfuseMac();
+  char buf[20];
+  snprintf(buf, sizeof(buf), "flipee-%02x%02x%02x",
+           (uint8_t)(mac >> 24), (uint8_t)(mac >> 16), (uint8_t)(mac >> 8));
+  return String(buf);
+}
+
 bool tryRelayReflection(String &outText) {
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
@@ -416,6 +434,8 @@ bool tryRelayReflection(String &outText) {
   http.setConnectTimeout(RELAY_CONNECT_TIMEOUT_MS);
 
   JsonDocument doc;
+  doc["device_id"] = deviceId();
+  doc["device_name"] = DEVICE_NAME;
   doc["city"] = city;
   doc["region"] = region;
   doc["country"] = country;

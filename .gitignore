@@ -11,6 +11,11 @@ env/
 .env
 *.md.bak
 
+# The relay's reflection archive — a location history, and local data by
+# definition. Back it up off the host; don't commit it.
+*.sqlite3
+*.sqlite3-journal
+
 # Arduino
 *.hex
 *.bin

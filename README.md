@@ -120,7 +120,8 @@ copy server\.env.example server\.env
 
 Edit `server/.env`, set `ANTHROPIC_API_KEY` and `FLIPEE_RELAY_KEY` (any
 long random string — it just needs to match `RELAY_KEY_VAL` in
-`Flipee/secrets.h`). Then:
+`Flipee/secrets.h`), and `FLIPEE_DASHBOARD_KEY` (a *different* long random
+string — the password for the dashboard, see below). Then:
 
 ```
 python server/flipee_relay.py
@@ -235,6 +236,53 @@ actually fetched, so it's never just filler text:
 /flipee/reflections/2026-09-24_143207.md
 ```
 
+## The dashboard
+
+The SD journal has one problem: it's write-only from a human's point of
+view. Reading it means pulling the card out, and on a build with no SD
+wired up (the default, since those pins aren't verified) the reflections
+aren't kept anywhere at all — they scroll off the screen and are gone.
+
+So the relay keeps them too. It already receives the full context of
+every reflection it writes, so `/reflect` now archives each one and
+serves a small web GUI for reading them back — at `http://<relay
+host>:5024/`, or your domain once it's behind nginx:
+
+```
+python server/flipee_relay.py     # dashboard at http://<this machine>:5024/
+```
+
+Entries are listed newest-first with their location, network, battery and
+timestamp (stored UTC, shown in your local time), the headlines each one
+was reacting to, and filters for device, day, and a free-text search
+across city/region/country/SSID — "where was it" is sometimes a city and
+sometimes the name of a cafe's WiFi. Every filter is in the URL, so views
+are shareable, and `/entries` returns the same query as JSON for
+scripting. Individual entries permalink at `/entry/<id>`.
+
+**It's password-protected and fails closed.** The archive is a log of
+where a device you carry around has been and when, which is worth more
+protection than the reflections themselves suggest. The password is
+`FLIPEE_DASHBOARD_KEY` in `.env`, and with it unset the dashboard returns
+503 rather than serving open — the same stance `/reflect` takes with
+`FLIPEE_RELAY_KEY`. It's deliberately a *separate* secret from the relay
+key: that one is compiled into the sketch and travels with the hardware,
+and shouldn't also unlock the archive. Failed logins are throttled per
+IP. Once there's TLS in front of it, set `FLIPEE_DASHBOARD_HTTPS=1` so
+the session cookie is marked `Secure` (it's off by default because a
+Secure cookie is never sent over plain HTTP, which makes same-LAN login
+look like it silently fails).
+
+Storage is a SQLite file — `server/flipee.sqlite3` unless you point
+`FLIPEE_DB_PATH` somewhere else, which you probably want on a VPS where
+the checkout gets replaced on deploy. It's gitignored, and scp'ing it off
+the host is a complete backup. Every row is keyed by `device_id`, a
+stable fingerprint derived from the board's efuse MAC (so it survives
+reflashing); set `DEVICE_NAME` in the sketch to show something friendlier
+than `flipee-3fa91c` once there's more than one. Archiving is
+best-effort: if the database is locked or the disk is full, the device
+still gets its reflection, it just won't show up here.
+
 ## Customization
 
 | Setting | What it does |
@@ -243,6 +291,7 @@ actually fetched, so it's never just filler text:
 | `HOME_SSID_VAL` / `HOME_PASSWORD_VAL` (in `secrets.h`) | Preferred network when visible; blank = always forage |
 | `WIFI_RETRY_MS` | How often to rescan after a failed forage |
 | `SERVER_HOST_VAL` / `RELAY_KEY_VAL` (in `secrets.h`), `SERVER_PORT` / `RELAY_USE_TLS` | Where the relay lives and how to reach it |
+| `DEVICE_NAME` | Friendly name for this board in the relay's dashboard; blank = its auto-generated `flipee-xxxxxx` id |
 | `RELAY_CONNECT_TIMEOUT_MS` / `RELAY_TIMEOUT_MS` | How long to wait for the relay to answer, then to reply (see above) |
 | `NEWS_REFRESH_MS` | How often to re-fetch headlines while connected |
 | `IDLE_SLEEP_MS` | How long untouched before dimming to a quiet clock |
@@ -254,8 +303,9 @@ actually fetched, so it's never just filler text:
 On the relay side, `flipee_relay.py` has `MODEL` and `SYSTEM_PROMPT` near
 the top — the system prompt currently asks for two or three short, wry,
 first-person paragraphs; adjust the voice there if you want something
-different. `FLIPEE_RELAY_KEY` and `FLIPEE_RELAY_PORT` (default `5024`)
-are set via `.env`, not in the Python file.
+different. `FLIPEE_RELAY_KEY`, `FLIPEE_DASHBOARD_KEY`,
+`FLIPEE_DASHBOARD_HTTPS`, `FLIPEE_DB_PATH` and `FLIPEE_RELAY_PORT`
+(default `5024`) are set via `.env`, not in the Python file.
 
 ## How location and news actually work
 
@@ -274,18 +324,6 @@ random open network Flipee ends up foraging, not just your home WiFi:
 
 ## Extending it
 
-- **A web dashboard on the relay** *(planned next)*: reflections are
-  currently write-only from a human's point of view — they land on a
-  microSD card that has to be physically removed to read, and on a build
-  with no SD wired up (the default) they aren't persisted at all. Since
-  `flipee_relay.py` already receives the full context of every reflection
-  it writes, it's the natural place to keep them: store each `/reflect`
-  call, then serve a small GUI for browsing entries by date and location.
-  That also makes the relay useful on its own rather than a one-shot
-  text generator, and pairs well with the "richer relay context" item
-  below — the same stored history feeds both. Worth designing the storage
-  with a device ID from the start, so it doesn't need reworking for the
-  multiple-devices item.
 - **Better flip detection**: right now "flip" is a sustained gyro-
   magnitude burst, not a real orientation check, because the IMU's axis
   mapping relative to the screen wasn't verified here. Once you have the
@@ -294,9 +332,15 @@ random open network Flipee ends up foraging, not just your home WiFi:
 - **More gesture types**: `detectFlip()` and the shake logic in `loop()`
   are the two patterns to copy for a third gesture — e.g. the unused
   touch controller pins on this board for a tap-to-refresh.
-- **Richer relay context**: `flipee_relay.py` currently gets one-shot
-  context per request. Keeping a rolling history of past reflections and
-  passing a few back in would let Claude's entries build on each other
-  rather than starting fresh every time.
-- **Multiple devices**: like AgentWatch, the relay doesn't key anything by
-  device — fine for one Flipee, would need a device ID to support more.
+- **Richer relay context**: `flipee_relay.py` still builds each prompt
+  from one request's worth of context, even though it now has every past
+  reflection sitting in the archive next to it. Passing the last few from
+  the same device back into the prompt would let entries build on each
+  other — "still here, still no idea where the tram goes" — rather than
+  starting fresh every time. `store.query(device_id=...)` already returns
+  exactly that.
+- **Multiple devices**: the archive is keyed by `device_id` and the
+  dashboard filters on it, so a second Flipee needs nothing beyond a
+  `DEVICE_NAME`. What's still single-tenant is the *key*: every device
+  shares one `FLIPEE_RELAY_KEY`, so revoking one means reflashing all of
+  them.

@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  Shared shell for the two dashboard pages. Colors are the sketch's
+  THEME_FLIPDOT converted out of RGB565 (near-black / amber / gray), so
+  the browser view looks like the device it's reading from.
+
+  No build step, no CDN, no framework: this has to keep working on a
+  small VPS years from now, and the whole UI is a list of text entries.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Flipee{% endblock %}</title>
+<style>
+  :root {
+    --bg: #080808;
+    --panel: #131211;
+    --line: #2a2724;
+    --fg: #f7c231;
+    --text: #e8e2d6;
+    --dim: #8a8378;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  a { color: var(--fg); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  header.top {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 20px;
+  }
+  header.top h1 {
+    margin: 0; font-size: 20px; letter-spacing: 4px; color: var(--fg);
+    text-transform: uppercase;
+  }
+  header.top .count { color: var(--dim); font-size: 13px; }
+  header.top .spacer { flex: 1; }
+  button, input, select {
+    font: inherit;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 6px 10px;
+  }
+  button { color: var(--fg); cursor: pointer; }
+  button:hover { border-color: var(--fg); }
+  .dim { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+{% block body %}{% endblock %}
+</div>
+</body>
+</html>
