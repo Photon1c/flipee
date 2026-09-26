@@ -147,20 +147,44 @@ elevate itself into a *second* window that disappears on any error. The
 Verify it worked with:
 
 ```
-Get-NetFirewallRule -DisplayName "Flipee relay (TCP 5024)"
+netsh advfirewall firewall show rule name="Flipee relay (TCP 5024)"
 ```
+
+(`netsh` rather than `Get-NetFirewallRule` — the cmdlet returns an empty
+list rather than an error in some restricted shells, which looks exactly
+like a missing rule.)
 
 To confirm the relay is actually being reached rather than silently
 falling back, flip Flipee and watch the serial monitor:
 
 ```
 [relay] POST http://10.0.0.x:5024/reflect
-[relay] ok, 885 chars of Claude
+[relay] ok, 1194 chars of Claude
 ```
 
-A `[relay] failed (http -1: ...)` there means unreachable — wrong
-`SERVER_HOST_VAL`, relay not running, or the firewall rule missing. A
-`401` means `RELAY_KEY_VAL` doesn't match `FLIPEE_RELAY_KEY`.
+The failure modes are distinguishable, which is the point of logging it:
+
+| Serial line | What it means |
+|---|---|
+| `failed (http -1: ...)` | Never connected — wrong `SERVER_HOST_VAL`, relay not running, or firewall rule missing |
+| `failed (http -11: read Timeout)` | Connected fine, but the reply didn't arrive inside `RELAY_TIMEOUT_MS` |
+| `failed (http 401: ...)` | Reached the relay; `RELAY_KEY_VAL` doesn't match `FLIPEE_RELAY_KEY` |
+| `failed (http 503: ...)` | Relay is running with no `FLIPEE_RELAY_KEY` set, so it refuses everything |
+
+### Why there are two relay timeouts
+
+`RELAY_CONNECT_TIMEOUT_MS` (2500) and `RELAY_TIMEOUT_MS` (15000) cover
+genuinely different waits, and collapsing them into one number makes a
+healthy relay look broken.
+
+Connecting answers "is anything listening at all?" Out in the wild the
+answer is usually no, and the gesture should stay responsive, so that
+stays short. But once the handshake succeeds the relay has committed to
+an LLM round-trip, which measured **3.4–4.0s on loopback alone** before
+any WiFi hop. A shared 2.5s budget expired mid-generation on every single
+flip — the relay was working perfectly and the device reported it as
+unreachable every time. If you swap `MODEL` in `flipee_relay.py` for a
+larger one, raise `RELAY_TIMEOUT_MS` to match.
 
 **On a VPS** (recommended — works from any network Flipee forages onto):
 run the same `flipee_relay.py`, but behind a real WSGI server and a TLS
@@ -219,6 +243,7 @@ actually fetched, so it's never just filler text:
 | `HOME_SSID_VAL` / `HOME_PASSWORD_VAL` (in `secrets.h`) | Preferred network when visible; blank = always forage |
 | `WIFI_RETRY_MS` | How often to rescan after a failed forage |
 | `SERVER_HOST_VAL` / `RELAY_KEY_VAL` (in `secrets.h`), `SERVER_PORT` / `RELAY_USE_TLS` | Where the relay lives and how to reach it |
+| `RELAY_CONNECT_TIMEOUT_MS` / `RELAY_TIMEOUT_MS` | How long to wait for the relay to answer, then to reply (see above) |
 | `NEWS_REFRESH_MS` | How often to re-fetch headlines while connected |
 | `IDLE_SLEEP_MS` | How long untouched before dimming to a quiet clock |
 | `SHAKE_THRESHOLD_G` / `SHAKE_COOLDOWN_MS` | Shake sensitivity and minimum time between shakes |
@@ -249,6 +274,18 @@ random open network Flipee ends up foraging, not just your home WiFi:
 
 ## Extending it
 
+- **A web dashboard on the relay** *(planned next)*: reflections are
+  currently write-only from a human's point of view — they land on a
+  microSD card that has to be physically removed to read, and on a build
+  with no SD wired up (the default) they aren't persisted at all. Since
+  `flipee_relay.py` already receives the full context of every reflection
+  it writes, it's the natural place to keep them: store each `/reflect`
+  call, then serve a small GUI for browsing entries by date and location.
+  That also makes the relay useful on its own rather than a one-shot
+  text generator, and pairs well with the "richer relay context" item
+  below — the same stored history feeds both. Worth designing the storage
+  with a device ID from the start, so it doesn't need reworking for the
+  multiple-devices item.
 - **Better flip detection**: right now "flip" is a sustained gyro-
   magnitude burst, not a real orientation check, because the IMU's axis
   mapping relative to the screen wasn't verified here. Once you have the
