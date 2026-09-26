@@ -38,16 +38,34 @@ $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 $isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
-    Write-Host 'Needs administrator rights -- asking Windows to elevate...' -ForegroundColor Yellow
     $scriptPath = $MyInvocation.MyCommand.Path
+
+    # No path means this was pasted into a shell rather than run as a file,
+    # so there is nothing to re-launch -- say so instead of failing silently.
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        Write-Host ''
+        Write-Host 'This needs administrator rights, and it cannot elevate itself' -ForegroundColor Red
+        Write-Host 'because it was pasted into a shell rather than run as a file.'
+        Write-Host ''
+        Write-Host 'Right-click allow-relay-firewall.cmd -> "Run as administrator".'
+        Write-Host ''
+        Read-Host 'Press Enter to close'
+        return
+    }
+
+    Write-Host 'Needs administrator rights -- asking Windows to elevate...' -ForegroundColor Yellow
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"")
     if ($Remove) { $argList += '-Remove' }
     try {
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -ErrorAction Stop
+        Write-Host 'Elevated window opened -- finish there, then re-check with:' -ForegroundColor Cyan
+        Write-Host '  Get-NetFirewallRule -DisplayName "Flipee relay (TCP 5024)"'
     } catch {
         Write-Host ''
         Write-Host 'Elevation was declined or failed.' -ForegroundColor Red
-        Write-Host 'Open an Administrator PowerShell and run this script again.'
+        Write-Host "Reason: $($_.Exception.Message)"
+        Write-Host ''
+        Write-Host 'Right-click allow-relay-firewall.cmd -> "Run as administrator" instead.'
         Read-Host 'Press Enter to close'
     }
     return
@@ -70,8 +88,27 @@ if ($Remove) {
 if ($existing) {
     Write-Host "Rule '$RuleName' already exists -- leaving it alone." -ForegroundColor Yellow
 } else {
-    New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private -RemoteAddress LocalSubnet -Description 'Lets Flipee (ESP32) reach flipee_relay.py on the home LAN' | Out-Null
-    Write-Host "Created firewall rule: $RuleName" -ForegroundColor Green
+    try {
+        New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private -RemoteAddress LocalSubnet -Description 'Lets Flipee (ESP32) reach flipee_relay.py on the home LAN' -ErrorAction Stop | Out-Null
+        Write-Host "Created firewall rule: $RuleName" -ForegroundColor Green
+    } catch {
+        Write-Host ''
+        Write-Host 'FAILED to create the rule.' -ForegroundColor Red
+        Write-Host "Reason: $($_.Exception.Message)"
+        Write-Host ''
+        Write-Host 'If this mentions Group Policy, the rule is managed centrally'
+        Write-Host 'and has to be added there instead.'
+        Read-Host 'Press Enter to close'
+        return
+    }
+}
+
+# Confirm it really exists rather than trusting that the call above worked.
+if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue)) {
+    Write-Host ''
+    Write-Host "Rule still not present after attempting to create it." -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    return
 }
 
 # --- report what's actually in effect --------------------------------------
