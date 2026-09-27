@@ -10,6 +10,7 @@
     <span class="count">{{ total }} reflection{{ '' if total == 1 else 's' }}{% if filters.device_id or filters.day or filters.place %} matching{% endif %}</span>
   {% endif %}
   <span class="spacer"></span>
+  <a href="{{ url_for('memory_view') }}">what it remembers &rarr;</a>
   <form method="post" action="{{ url_for('logout') }}"><button type="submit">Sign out</button></form>
 </header>
 

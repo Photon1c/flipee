@@ -407,6 +407,53 @@ def get_memory(device_id, pk):
     return out
 
 
+def memories(device_id=None):
+    """Every memory row, with a readable place label recovered from the
+    reflections that created it (device_memory stores only the key)."""
+    where, params = [], []
+    if device_id:
+        where.append("m.device_id = ?")
+        params.append(device_id)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT m.*,
+                      (SELECT city   FROM reflections r WHERE r.place_key = m.place_key
+                        ORDER BY r.created_utc DESC LIMIT 1) AS city,
+                      (SELECT region FROM reflections r WHERE r.place_key = m.place_key
+                        ORDER BY r.created_utc DESC LIMIT 1) AS region,
+                      (SELECT country FROM reflections r WHERE r.place_key = m.place_key
+                        ORDER BY r.created_utc DESC LIMIT 1) AS country,
+                      (SELECT COUNT(*) FROM reflections r
+                        WHERE r.device_id = m.device_id AND r.place_key = m.place_key) AS entries
+                 FROM device_memory m""" + clause +
+            " ORDER BY m.device_id, (m.place_key = '*') DESC, m.updated_utc DESC",
+            params,
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        for field in ("threads", "covered"):
+            try:
+                item[field] = json.loads(item[field] or "[]")
+            except (ValueError, TypeError):
+                item[field] = []
+        if item["place_key"] == GLOBAL_KEY:
+            item["label"] = "Carried everywhere"
+        else:
+            item["label"] = ", ".join(
+                p for p in (item["city"], item["region"], item["country"]) if p
+            ) or item["place_key"].replace("|", ", ").strip(", ")
+        out.append(item)
+    return out
+
+
+def delete_memory(device_id, pk):
+    with connect() as conn:
+        conn.execute("DELETE FROM device_memory WHERE device_id = ? AND place_key = ?",
+                     (device_id, pk))
+
+
 def save_memory(device_id, pk, notes, threads, covered):
     with connect() as conn:
         conn.execute(
