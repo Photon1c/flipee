@@ -61,6 +61,7 @@
       <span class="where">{{ e.location }}</span>
       {% if e.ssid %}<span class="dim">via {{ e.ssid }}</span>{% endif %}
       {% if e.battery_pct is not none %}<span class="dim">{{ e.battery_pct }}%</span>{% endif %}
+      {% if e.in_tokens %}<span class="dim" title="briefing in / entry out">{{ e.in_tokens }}&rarr;{{ e.out_tokens }} tok</span>{% endif %}
       <span class="dim device">{{ e.device_name or e.device_id }}</span>
     </div>
     <div class="text">{{ e.text }}</div>

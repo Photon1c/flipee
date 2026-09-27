@@ -97,6 +97,7 @@ ROUTES
 
 import hashlib
 import hmac
+import logging
 import os
 import threading
 import time
@@ -193,6 +194,11 @@ app.config.update(
     # FLIPEE_DASHBOARD_HTTPS=1 wherever there's TLS in front.
     SESSION_COOKIE_SECURE=DASHBOARD_HTTPS,
 )
+
+# Flask's logger defaults to WARNING outside debug mode, which silently
+# swallowed the one line that says whether a memory call was skipped —
+# the whole point of the skip is that you can see it happening.
+app.logger.setLevel(logging.INFO)
 
 store.init()
 
@@ -445,6 +451,12 @@ def reflect():
         text = "".join(block.text for block in response.content if block.type == "text").strip()
         if not text:
             return jsonify({"ok": False, "error": "empty response from model"}), 502
+        # Real usage, archived per entry. The briefing is bounded by design,
+        # but "should be bounded" and "is bounded" are different claims —
+        # this is what makes the second one checkable as the archive grows.
+        usage = getattr(response, "usage", None)
+        in_tokens = getattr(usage, "input_tokens", None)
+        out_tokens = getattr(usage, "output_tokens", None)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -468,6 +480,7 @@ def reflect():
             tz_offset_s=tz_offset_s if isinstance(tz_offset_s, int) else None,
             lat=lat if isinstance(lat, (int, float)) else None,
             lon=lon if isinstance(lon, (int, float)) else None,
+            in_tokens=in_tokens, out_tokens=out_tokens,
         )
     except Exception as e:
         app.logger.warning("could not archive reflection: %s", e)
@@ -475,10 +488,14 @@ def reflect():
     # Distil what's worth carrying forward — on a background thread, after
     # the reply is built. The device is waiting on the entry, not on this.
     if entry_id and state and MEMORY_ENABLED:
-        memory.update_async(
-            client, MEMORY_MODEL, device_id, state["place_key"], location,
-            text, headlines, logger=app.logger,
-        )
+        if memory.should_update(device_id, state["place_key"], state):
+            memory.update_async(
+                client, MEMORY_MODEL, device_id, state["place_key"], location,
+                text, headlines, logger=app.logger,
+            )
+        else:
+            app.logger.info("memory: nothing new since the last distillation, "
+                            "skipping the update call")
 
     return jsonify({"ok": True, "text": text, "id": entry_id})
 

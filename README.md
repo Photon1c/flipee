@@ -342,6 +342,57 @@ start over.
 Set `FLIPEE_MEMORY=0` for one call per flip and no distillation, or
 `FLIPEE_PLACE_LOOKUP=0` to keep its knowledge strictly first-hand.
 
+### What that costs
+
+Run `python server/token_report.py` for a live per-section breakdown
+against your own archive. Counting is free and doesn't run inference, so
+re-run it after any prompt change. On Claude Haiku 4.5 at the time of
+writing, one flip measured:
+
+```
+REFLECTION CALL
+  system prompt                                     501
+  YOUR STATE                                        245
+  WHAT YOU'VE WORKED OUT ABOUT THIS PLACE           132
+  HEADLINES YOU HAVE ALREADY SEEN                    91
+  BACKGROUND ON THIS PLACE                           89
+  ...
+  YOUR LAST ENTRIES, VERBATIM                       256
+  TOTAL INPUT                                      1621
+MEMORY CALL (only when there's something new)      1223
+```
+
+**The briefing does not grow with the archive.** That's the property
+worth protecting: state comes from indexed counts rather than rows,
+`covered` caps at 14, `threads` at 4, the place summary at 700
+characters, and the verbatim window at one or two entries. A thousand
+reflections from now the prompt is the same size. Actual per-entry usage
+is recorded in `in_tokens`/`out_tokens` and shown on each dashboard
+entry, so that claim stays checkable rather than aspirational.
+
+Three things keep it down, each one measured rather than assumed:
+
+- **The distillation call is skipped when it has nothing to learn.** It's
+  ~1223 tokens — 43% of a flip — and three flips ten seconds apart used
+  to buy three near-identical rewrites of the same notes. Now it only
+  runs if the feed moved or `MIN_GAP_MINUTES` has passed.
+- **One verbatim entry instead of two, once notes exist.** That block was
+  the most expensive part of the briefing (479 tokens). The notes already
+  carry what the older entry *said*; one sample is enough to carry how it
+  sounded. 479 → 256.
+- **Already-read headlines are truncated to three plus a count.** Listing
+  all eight spent ~200 tokens showing the model things the same prompt
+  tells it to treat as background. 208 → 91.
+
+**Prompt caching doesn't help here, and it's worth knowing why.** Claude
+Haiku 4.5 won't cache a prefix below **4096 tokens**, and the whole
+request is ~1621 — a `cache_control` marker would be silently ignored
+(`cache_creation_input_tokens: 0`, no error). The minimum isn't monotonic
+across models, so this is worth re-checking rather than assuming if you
+change `MODEL`. Padding the prompt to reach the minimum would cost more
+than the cache saves, and flips are usually further apart than the
+5-minute TTL anyway, so the entries would mostly be cold.
+
 ## Customization
 
 | Setting | What it does |

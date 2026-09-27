@@ -28,10 +28,17 @@ informed and nothing else breaks.
 
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 
 import store
 
 MAX_TOKENS = 700
+# Don't distill again this soon unless the feed actually moved. Measured,
+# the distillation call is ~1.2k input tokens — about 38% of a flip's
+# total — and three flips in ten seconds (which is how this device really
+# gets used) produce three near-identical rewrites of the same notes. The
+# entry still gets archived; only the bookkeeping is skipped.
+MIN_GAP_MINUTES = 20
 # Small enough that the model must actually choose what matters. An
 # unbounded memory becomes a transcript, which is what we already have.
 NOTE_LIMITS = "about 100 words for place notes, about 60 for carried notes"
@@ -59,6 +66,22 @@ def _lock_for(device_id):
         if device_id not in _LOCKS:
             _LOCKS[device_id] = threading.Lock()
         return _LOCKS[device_id]
+
+
+def should_update(device_id, pk, state):
+    """Whether this entry is worth a distillation call.
+
+    Yes if anything genuinely new came through the feed, or if it's been
+    long enough that the notes have drifted. No for the burst of flips a
+    few seconds apart that all saw the same headlines — those would spend
+    a full call to rewrite the same paragraph.
+    """
+    if state.get("new_headlines"):
+        return True
+    last = store._parse_utc(store.get_memory(device_id, pk)["updated_utc"] or "")
+    if last is None:
+        return True  # never distilled here
+    return datetime.now(timezone.utc) - last >= timedelta(minutes=MIN_GAP_MINUTES)
 
 
 def _parse_json(text):
