@@ -131,15 +131,29 @@ def place_key(city, region, country):
 
 
 def init():
-    """Create the schema if it isn't there, and migrate. Safe every start."""
+    """Create the schema if it isn't there, and migrate. Safe every start.
+
+    Also safe to run from several processes at once, which is not
+    hypothetical: `gunicorn -w 2` imports this module in every worker
+    simultaneously, and on the first boot after a schema change they all
+    race to add the same column. Whoever loses used to crash at import
+    with "duplicate column name" and take the worker with it.
+    """
     with connect() as conn:
         conn.executescript(SCHEMA)
         existing = {r["name"] for r in conn.execute("PRAGMA table_info(reflections)")}
         added = []
         for name, ddl in _ADDED_COLUMNS:
-            if name not in existing:
+            if name in existing:
+                continue
+            try:
                 conn.execute("ALTER TABLE reflections ADD COLUMN %s %s" % (name, ddl))
                 added.append(name)
+            except sqlite3.OperationalError as e:
+                # Another worker got there between the PRAGMA and here.
+                # Anything else is a real problem and should surface.
+                if "duplicate column" not in str(e).lower():
+                    raise
         if "place_key" in added:
             # Backfill from the city/region/country already on every row, so
             # pre-migration history still counts toward "how long have I
