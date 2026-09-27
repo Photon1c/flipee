@@ -187,6 +187,31 @@ flip — the relay was working perfectly and the device reported it as
 unreachable every time. If you swap `MODEL` in `flipee_relay.py` for a
 larger one, raise `RELAY_TIMEOUT_MS` to match.
 
+**VPS checklist.** The repo carries no secrets and no data, so a fresh
+clone needs four things before it will serve anything:
+
+1. `pip install -r server/requirements.txt -r server/requirements-vps.txt`
+   (the second adds gunicorn, which doesn't install on Windows — that's
+   why it's a separate file).
+2. **Recreate `server/.env`.** It's gitignored, so it does not arrive
+   with the clone: `ANTHROPIC_API_KEY`, `FLIPEE_RELAY_KEY`,
+   `FLIPEE_DASHBOARD_KEY`, and `FLIPEE_DASHBOARD_HTTPS=1` once TLS is in
+   front. `FLIPEE_RELAY_KEY` must match `RELAY_KEY_VAL` in the sketch's
+   `secrets.h` exactly, or every flip gets a 401 and silently falls back.
+3. **Rotate the keys if they were ever LAN-only.** A short relay key is
+   fine on your own network and is an invitation once `/reflect` answers
+   the open internet — anyone who guesses it spends your Anthropic
+   credits.
+4. **Decide what happens to the archive.** `flipee.sqlite3` is gitignored
+   too, so the VPS starts empty: no entries, and no distilled memory, so
+   Flipee begins re-introducing places it already knows. `scp` the file
+   across first if you want its history to survive the move. Set
+   `FLIPEE_DB_PATH` somewhere outside the checkout while you're there.
+
+Then gunicorn behind nginx, per the module docstring — don't expose
+5024 directly, and don't run plain HTTP on the public internet: the
+dashboard password and `X-Flipee-Key` both travel in the clear.
+
 **On a VPS** (recommended — works from any network Flipee forages onto):
 run the same `flipee_relay.py`, but behind a real WSGI server and a TLS
 reverse proxy rather than the command above. Full instructions, including
