@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS reflections (
     lon         REAL,
     headlines   TEXT    NOT NULL DEFAULT '[]',  -- JSON array of strings
     model       TEXT    NOT NULL DEFAULT '',
+    in_tokens   INTEGER,                        -- what the briefing actually cost
+    out_tokens  INTEGER,
     text        TEXT    NOT NULL
 );
 -- What Flipee has worked out and wants to carry forward, distilled after
@@ -110,6 +112,8 @@ _ADDED_COLUMNS = (
     ("tz_offset_s", "INTEGER"),
     ("lat", "REAL"),
     ("lon", "REAL"),
+    ("in_tokens", "INTEGER"),
+    ("out_tokens", "INTEGER"),
 )
 
 
@@ -154,7 +158,8 @@ def utc_now_iso():
 
 def save(device_id, device_name, city, region, country, ssid,
          battery_pct, uptime_s, headlines, model, text, created_utc=None,
-         local_time="", tz_offset_s=None, lat=None, lon=None):
+         local_time="", tz_offset_s=None, lat=None, lon=None,
+         in_tokens=None, out_tokens=None):
     """Store one reflection; returns its row id.
 
     `created_utc` is the relay's own clock rather than anything the device
@@ -168,12 +173,13 @@ def save(device_id, device_name, city, region, country, ssid,
             """INSERT INTO reflections
                  (device_id, device_name, created_utc, city, region, country,
                   place_key, ssid, battery_pct, uptime_s, local_time,
-                  tz_offset_s, lat, lon, headlines, model, text)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  tz_offset_s, lat, lon, headlines, model, in_tokens,
+                  out_tokens, text)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (device_id, device_name, created_utc or utc_now_iso(), city, region,
              country, place_key(city, region, country), ssid, battery_pct,
              uptime_s, local_time, tz_offset_s, lat, lon,
-             json.dumps(list(headlines or [])), model, text),
+             json.dumps(list(headlines or [])), model, in_tokens, out_tokens, text),
         )
         return cur.lastrowid
 
