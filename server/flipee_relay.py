@@ -111,6 +111,7 @@ import anthropic
 
 import context
 import memory
+import review
 import store
 
 load_dotenv()
@@ -361,6 +362,65 @@ def entry(entry_id):
         days=[],
         single=True,
     )
+
+
+@app.route("/memory", methods=["GET"])
+def memory_view():
+    """What Flipee currently believes, with the unsourced parts marked.
+
+    Memory is the one place where a single wrong sentence keeps costing
+    something: it goes into every future briefing stated as fact. Reading
+    it shouldn't require opening SQLite, and fixing it shouldn't either.
+    """
+    blocked = require_dashboard()
+    if blocked is not None:
+        return blocked
+
+    items = []
+    for item in store.memories():
+        sources = review.sources_for(item["device_id"], item["place_key"])
+        item["note_segments"] = review.annotate(item["notes"], source_text=sources)
+        item["thread_segments"] = [
+            review.annotate(t, source_text=sources) for t in item["threads"]
+        ]
+        item["flagged"] = (review.count_flagged(item["note_segments"])
+                           + sum(review.count_flagged(s) for s in item["thread_segments"]))
+        items.append(item)
+    return render_template("memory.html", items=items,
+                           total_flagged=sum(i["flagged"] for i in items))
+
+
+@app.route("/memory/save", methods=["POST"])
+def memory_save():
+    blocked = require_dashboard()
+    if blocked is not None:
+        return blocked
+    device_id = request.form.get("device_id", "")
+    pk = request.form.get("place_key", "")
+    if not device_id or not pk:
+        abort(400)
+    # One per line in the form; empty lines dropped.
+    lines = lambda field: [l.strip() for l in
+                           (request.form.get(field) or "").splitlines() if l.strip()]
+    store.save_memory(device_id, pk,
+                      notes=(request.form.get("notes") or "").strip(),
+                      threads=lines("threads"), covered=lines("covered"))
+    return redirect(url_for("memory_view"))
+
+
+@app.route("/memory/forget", methods=["POST"])
+def memory_forget():
+    blocked = require_dashboard()
+    if blocked is not None:
+        return blocked
+    device_id = request.form.get("device_id", "")
+    pk = request.form.get("place_key", "")
+    if not device_id or not pk:
+        abort(400)
+    # The archived entries are untouched — this only drops what was
+    # distilled from them, so the place starts over from what it reads.
+    store.delete_memory(device_id, pk)
+    return redirect(url_for("memory_view"))
 
 
 @app.route("/entries", methods=["GET"])

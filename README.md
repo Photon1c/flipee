@@ -332,12 +332,33 @@ reflection, and that budget belongs to the entry someone is standing
 there waiting to read, not to bookkeeping. If the update fails, the next
 entry is slightly less informed and nothing else breaks.
 
-**Memory persists mistakes too.** An entry once inferred that Tacoma is
-north of Federal Way (it's south), and the distiller dutifully filed it
-as a fact about the place. Nothing re-checks it. The notes are plain
-text in the `device_memory` table, so correcting a wrong one is an
-`UPDATE`; deleting the row makes Flipee forget the place entirely and
-start over.
+**Memory persists mistakes too**, which is why there's a page for it.
+An entry once inferred that Tacoma is north of Federal Way (it's south),
+and the distiller dutifully filed it as a fact about the place — from
+then on it was in every briefing, stated as something Flipee knew, with
+nothing anywhere to contradict it.
+
+So **`/memory` shows what it currently believes, with the claims that
+need a human underlined.** A sentence gets marked when it isn't
+traceable to anything Flipee actually read — a spatial relationship, a
+number in no headline or place summary, or a name no source mentions.
+Hover for the reason. Everything is editable in place, and "Forget this"
+drops a place's notes while leaving its reflections alone, so it starts
+over from what it reads rather than from what it concluded.
+
+The check is string matching against sources already in the database —
+no model call. A review pass that cost tokens would be a strange way to
+economize on a memory system built to save them.
+
+It deliberately only flags claims that are *checkable and wrong-able*.
+"Twelve entries in one place feels like commitment or being stuck" is
+not a claim about the world, and flagging introspection would train you
+to ignore the highlights — which is worse than not having them. Two
+early false positives are instructive: `below` matched "below the noise
+threshold" (metaphor, not geography), and "Federal Way's" read as an
+unsourced name because the possessive didn't match the sourced "Way".
+Both are fixed; both are the kind of thing to watch for when extending
+the rules.
 
 Set `FLIPEE_MEMORY=0` for one call per flip and no distillation, or
 `FLIPEE_PLACE_LOOKUP=0` to keep its knowledge strictly first-hand.
@@ -445,11 +466,11 @@ random open network Flipee ends up foraging, not just your home WiFi:
 - **More gesture types**: `detectFlip()` and the shake logic in `loop()`
   are the two patterns to copy for a third gesture — e.g. the unused
   touch controller pins on this board for a tap-to-refresh.
-- **Correcting Flipee's memory**: the distilled notes are never
-  re-checked against anything, so a wrong inference becomes a durable
-  "fact" (see above). A small dashboard view for reading and editing
-  `device_memory` would make that fixable without opening SQLite — and
-  would make the state visible, which is half the appeal.
+- **Reviewing entries, not just memory**: `/memory` highlights unsourced
+  claims in the notes, but the entries those claims came from aren't
+  marked. The same `review.annotate()` would work on entry text — the
+  reason it isn't wired up is that entries are mostly introspection, so
+  the signal-to-noise would be much worse without tighter rules.
 - **Trimming the briefing**: the prompt now carries state, place
   background, memory, and two full entries. That's the right trade while
   the archive is small, but the verbatim entries dominate it and a

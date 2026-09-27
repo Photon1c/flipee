@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Flipee — memory{% endblock %}
+{% block body %}
+
+<header class="top">
+  <h1><a href="{{ url_for('dashboard') }}">Flipee</a></h1>
+  <span class="count">
+    what it currently believes
+    {%- if total_flagged %} — <span class="flagcount">{{ total_flagged }} to check</span>{% endif %}
+  </span>
+  <span class="spacer"></span>
+  <a href="{{ url_for('dashboard') }}">reflections &rarr;</a>
+</header>
+
+<p class="dim intro">
+  These notes go into every future entry, stated as things Flipee knows.
+  Highlighted sentences make a claim that isn't traceable to a headline it
+  read or the place summary it looked up — usually fine, occasionally a
+  confident invention that will keep being repeated until it's corrected.
+  Hover a highlight for the reason. Everything here is editable.
+</p>
+
+{% if not items %}
+  <p class="empty dim">Flipee hasn't distilled anything yet. Memory is
+  written after a reflection, so this fills in once it has written one.</p>
+{% endif %}
+
+{% for item in items %}
+  <section class="mem">
+    <h2>
+      {{ item.label }}
+      <span class="dim">
+        {{ item.device_id }}{% if item.entries %} · {{ item.entries }} entries{% endif %}
+        {%- if item.updated_utc %} · updated <time data-utc="{{ item.updated_utc }}">{{ item.updated_utc }}</time>{% endif %}
+      </span>
+      {% if item.flagged %}<span class="flagcount">{{ item.flagged }} to check</span>{% endif %}
+    </h2>
+
+    <div class="rendered">
+      {% for seg in item.note_segments %}
+        {%- if seg.reasons -%}
+          <mark title="{{ seg.reasons|join(' · ') }}">{{ seg.text }}</mark>
+        {%- else -%}
+          {{ seg.text }}
+        {%- endif %}
+      {% endfor %}
+    </div>
+
+    {% if item.threads %}
+      <h3>Open threads</h3>
+      <ul class="rendered">
+        {% for segments in item.thread_segments %}
+          <li>
+            {% for seg in segments %}
+              {%- if seg.reasons -%}
+                <mark title="{{ seg.reasons|join(' · ') }}">{{ seg.text }}</mark>
+              {%- else -%}
+                {{ seg.text }}
+              {%- endif %}
+            {% endfor %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if item.covered %}
+      <h3>Angles already used {% if item.place_key != '*' %}here{% endif %}</h3>
+      <ul class="covered dim">{% for c in item.covered %}<li>{{ c }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    <details class="editor">
+      <summary>Edit</summary>
+      <form method="post" action="{{ url_for('memory_save') }}">
+        <input type="hidden" name="device_id" value="{{ item.device_id }}">
+        <input type="hidden" name="place_key" value="{{ item.place_key }}">
+        <label>Notes</label>
+        <textarea name="notes" rows="6">{{ item.notes }}</textarea>
+        <label>Open threads <span class="dim">(one per line)</span></label>
+        <textarea name="threads" rows="4">{{ item.threads|join('\n') }}</textarea>
+        <label>Angles already used <span class="dim">(one per line)</span></label>
+        <textarea name="covered" rows="6">{{ item.covered|join('\n') }}</textarea>
+        <button type="submit">Save</button>
+      </form>
+      <form method="post" action="{{ url_for('memory_forget') }}"
+            onsubmit="return confirm('Forget everything Flipee distilled about {{ item.label }}? The reflections themselves are kept — only the notes go.')">
+        <input type="hidden" name="device_id" value="{{ item.device_id }}">
+        <input type="hidden" name="place_key" value="{{ item.place_key }}">
+        <button type="submit" class="danger">Forget this</button>
+      </form>
+    </details>
+  </section>
+{% endfor %}
+
+<style>
+  .intro { max-width: 60ch; margin-bottom: 28px; }
+  .mem { border-left: 2px solid var(--line); padding-left: 16px; margin-bottom: 36px; }
+  .mem h2 { font-size: 15px; margin: 0 0 4px; color: var(--fg); font-weight: normal; }
+  .mem h2 .dim { font-size: 12px; display: block; margin-top: 2px; }
+  .mem h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+            color: var(--dim); margin: 20px 0 6px; font-weight: normal; }
+  .rendered { line-height: 1.7; }
+  /* Amber on near-black is the whole theme, so a highlight can't be a
+     fill without competing with everything else — underline it instead. */
+  mark {
+    background: transparent; color: var(--text);
+    border-bottom: 2px solid #e2683f; cursor: help;
+  }
+  .flagcount { color: #e2683f; font-size: 12px; }
+  .covered { padding-left: 20px; font-size: 13px; }
+  .editor { margin-top: 16px; }
+  .editor summary { cursor: pointer; color: var(--fg); font-size: 13px; }
+  .editor form { margin-top: 12px; }
+  .editor label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  .editor textarea { width: 100%; font: inherit; background: var(--panel);
+                     color: var(--text); border: 1px solid var(--line);
+                     border-radius: 4px; padding: 8px; resize: vertical; }
+  .editor .danger { color: #e2683f; margin-top: 8px; }
+</style>
+
+<script>
+  for (const el of document.querySelectorAll("time[data-utc]")) {
+    const d = new Date(el.dataset.utc);
+    if (!isNaN(d)) el.textContent = d.toLocaleString(undefined,
+      { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+</script>
+{% endblock %}
