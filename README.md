@@ -283,6 +283,65 @@ than `flipee-3fa91c` once there's more than one. Archiving is
 best-effort: if the database is locked or the disk is full, the device
 still gets its reflection, it just won't show up here.
 
+## Why the entries build on each other
+
+The first version of the relay sent one request's worth of facts and
+nothing else, and it showed. Twelve consecutive entries from the same
+desk all opened "Woke up in Federal Way", all picked the same two
+headlines out of the same cached feed, all announced plans to move on
+from a network the device never left, and two written ten seconds apart
+both discovered the town from scratch. One even called it morning at
+two in the afternoon.
+
+None of that was the model failing. Nothing in the prompt said: you have
+been here seven hours, you wrote four minutes ago, you already used the
+apartment fire, and you are not going anywhere. So now it does. Before
+each entry the relay assembles a briefing (`context.py`):
+
+- **State** — entry number, how long since the last one, whether it has
+  moved, how long it's been in this place, which networks it's used
+  here, where else it has woken up. All indexed counts, no model calls.
+- **Place** — a Wikipedia summary for the city, fetched once and cached
+  forever (`place.py`). Knowing Federal Way is a 100k-person suburb 25
+  miles south of Seattle gives it something to think *with*, so the
+  headlines stop being the only evidence the place exists.
+- **Memory** — what it distilled from earlier entries, below.
+- **Headlines split into new vs already seen**, so a feed that hasn't
+  changed reads as "nothing new" rather than as a fresh discovery.
+- **Its last two entries verbatim**, with instructions not to echo their
+  openings or closing moves.
+
+Plus the honesty constraints that state makes possible: don't claim a
+battery level with no sensor, don't call it morning unless the device's
+own clock says so, don't announce you're moving on unless something says
+you are.
+
+**Memory that outlives the window.** Feeding back the last two entries
+buys continuity for about an hour; once an entry scrolls out, whatever
+Flipee worked out in it is gone. So after each reflection a second cheap
+call (`memory.py`) distills three things into SQLite: durable **notes**
+about the place and about itself, **threads** it left open, and
+**covered** angles it shouldn't reuse. That's the difference between a
+longer prompt and actual state — and it's why a second flip five minutes
+later now opens "Still here. Still Homenode." and picks up a question it
+asked itself rather than re-reporting the news.
+
+It runs on a background thread *after* the device has its reply. Flipee
+waits at most `RELAY_TIMEOUT_MS` before falling back to a templated
+reflection, and that budget belongs to the entry someone is standing
+there waiting to read, not to bookkeeping. If the update fails, the next
+entry is slightly less informed and nothing else breaks.
+
+**Memory persists mistakes too.** An entry once inferred that Tacoma is
+north of Federal Way (it's south), and the distiller dutifully filed it
+as a fact about the place. Nothing re-checks it. The notes are plain
+text in the `device_memory` table, so correcting a wrong one is an
+`UPDATE`; deleting the row makes Flipee forget the place entirely and
+start over.
+
+Set `FLIPEE_MEMORY=0` for one call per flip and no distillation, or
+`FLIPEE_PLACE_LOOKUP=0` to keep its knowledge strictly first-hand.
+
 ## Customization
 
 | Setting | What it does |
@@ -303,9 +362,12 @@ still gets its reflection, it just won't show up here.
 On the relay side, `flipee_relay.py` has `MODEL` and `SYSTEM_PROMPT` near
 the top — the system prompt currently asks for two or three short, wry,
 first-person paragraphs; adjust the voice there if you want something
-different. `FLIPEE_RELAY_KEY`, `FLIPEE_DASHBOARD_KEY`,
-`FLIPEE_DASHBOARD_HTTPS`, `FLIPEE_DB_PATH` and `FLIPEE_RELAY_PORT`
-(default `5024`) are set via `.env`, not in the Python file.
+different — though note that the briefing in `context.py` now does much
+of the work the system prompt used to. `FLIPEE_RELAY_KEY`,
+`FLIPEE_DASHBOARD_KEY`, `FLIPEE_DASHBOARD_HTTPS`, `FLIPEE_DB_PATH`,
+`FLIPEE_MEMORY`, `FLIPEE_MEMORY_MODEL`, `FLIPEE_PLACE_LOOKUP` and
+`FLIPEE_RELAY_PORT` (default `5024`) are set via `.env`, not in the
+Python file.
 
 ## How location and news actually work
 
@@ -332,13 +394,15 @@ random open network Flipee ends up foraging, not just your home WiFi:
 - **More gesture types**: `detectFlip()` and the shake logic in `loop()`
   are the two patterns to copy for a third gesture — e.g. the unused
   touch controller pins on this board for a tap-to-refresh.
-- **Richer relay context**: `flipee_relay.py` still builds each prompt
-  from one request's worth of context, even though it now has every past
-  reflection sitting in the archive next to it. Passing the last few from
-  the same device back into the prompt would let entries build on each
-  other — "still here, still no idea where the tram goes" — rather than
-  starting fresh every time. `store.query(device_id=...)` already returns
-  exactly that.
+- **Correcting Flipee's memory**: the distilled notes are never
+  re-checked against anything, so a wrong inference becomes a durable
+  "fact" (see above). A small dashboard view for reading and editing
+  `device_memory` would make that fixable without opening SQLite — and
+  would make the state visible, which is half the appeal.
+- **Trimming the briefing**: the prompt now carries state, place
+  background, memory, and two full entries. That's the right trade while
+  the archive is small, but the verbatim entries dominate it and a
+  summary of them would cost less. Worth measuring before assuming.
 - **Multiple devices**: the archive is keyed by `device_id` and the
   dashboard filters on it, so a second Flipee needs nothing beyond a
   `DEVICE_NAME`. What's still single-tenant is the *key*: every device
