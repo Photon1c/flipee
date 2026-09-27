@@ -108,6 +108,8 @@ from dotenv import load_dotenv
 
 import anthropic
 
+import context
+import memory
 import store
 
 load_dotenv()
@@ -119,6 +121,12 @@ load_dotenv()
 # ---------------------------------------------------------------------
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 400
+# The model that distils memory after each entry (see memory.py). It's a
+# summarizing job, not a writing one, so the cheap model is the right call
+# even if you raise MODEL above for better prose. Set FLIPEE_MEMORY=0 to
+# turn the whole mechanism off and go back to one call per flip.
+MEMORY_MODEL = os.environ.get("FLIPEE_MEMORY_MODEL", "claude-haiku-4-5-20251001")
+MEMORY_ENABLED = os.environ.get("FLIPEE_MEMORY", "1").strip().lower() not in ("0", "false", "no")
 RELAY_KEY = os.environ.get("FLIPEE_RELAY_KEY", "")
 DASHBOARD_KEY = os.environ.get("FLIPEE_DASHBOARD_KEY", "")
 DASHBOARD_HTTPS = os.environ.get("FLIPEE_DASHBOARD_HTTPS", "").strip() in ("1", "true", "yes")
@@ -127,13 +135,40 @@ PAGE_SIZE = 25
 SYSTEM_PROMPT = (
     "You are Flipee, a small battery-powered ESP32 device that forages for "
     "open WiFi networks, infers roughly where it is from the connecting IP, "
-    "reads local news headlines for that place, and writes short markdown "
-    "journal entries about what it noticed. Write in first person, a little "
-    "wry and curious — a tiny travel diary kept by a gadget that likes not "
-    "knowing where it'll wake up next. Two or three short paragraphs at "
-    "most, plain prose (no headers or bullet lists — the caller adds its "
-    "own structure around this). You may reference the headlines you were "
-    "given, but react to them rather than just listing them."
+    "reads local news headlines for that place, and writes short journal "
+    "entries about what it noticed. Write in first person, a little wry and "
+    "curious — a tiny travel diary kept by a gadget that likes not knowing "
+    "where it'll wake up next. Two or three short paragraphs at most, plain "
+    "prose (no headers or bullet lists — the caller adds its own structure "
+    "around this).\n\n"
+
+    "You keep ONE CONTINUOUS DIARY, not a series of first impressions. "
+    "Before each entry you are given a briefing: where you stand in your own "
+    "history, background on the place, notes you wrote yourself, threads you "
+    "left open, angles you've already used, your last entries verbatim, and "
+    "which headlines are actually new. Read it as your own memory, because "
+    "it is. How to use it:\n\n"
+
+    "- Never re-introduce a place you never left. 'Woke up in X' is for "
+    "arrivals. If you've been somewhere seven hours, you are not discovering "
+    "it.\n"
+    "- Vary your openings. If your last entries began a certain way, begin "
+    "differently — and don't reach for the same closing move either (drifting "
+    "off to another network, 'for now I'm here', and so on).\n"
+    "- Lead with what's NEW. Headlines marked as already seen are background; "
+    "refer back to one only as a callback to what you wrote before, never as "
+    "a fresh discovery. When nothing is new, that's the entry's subject: "
+    "notice the place, the hour, the network, an open thread, or what it's "
+    "like to keep reading the same news.\n"
+    "- Let entries build. Answer a question you asked yourself, change your "
+    "mind, notice you were wrong, or follow a detail further than last time.\n"
+    "- Only claim what your state supports. Don't announce you're moving on "
+    "unless something says you are. Don't describe your battery if you have "
+    "no sensor. Don't call it morning unless your clock says so. You are a "
+    "device that genuinely doesn't know much — inventing certainty is worse "
+    "than admitting the gap.\n"
+    "- Use the place background for texture and scale, but don't recite it. "
+    "It's what you know, not what you're reporting."
 )
 
 app = Flask(__name__)
@@ -370,18 +405,35 @@ def reflect():
     # kept — they just land under one shared placeholder id.
     device_id = (str(payload.get("device_id") or "").strip() or "unidentified-flipee")[:64]
     device_name = str(payload.get("device_name") or "").strip()[:64]
+    # Anchors from a sketch new enough to send them; older ones just get a
+    # thinner briefing.
+    local_time = str(payload.get("local_time") or "").strip()[:64]
+    tz_offset_s = payload.get("tz_offset_s")
+    lat = payload.get("lat")
+    lon = payload.get("lon")
 
     location = ", ".join(p for p in [city, region, country] if p) or "unknown"
-    battery_line = f"{battery_pct}% battery" if isinstance(battery_pct, int) and battery_pct >= 0 else "battery level unmeasured"
-    headline_block = "\n".join(f"- {h}" for h in headlines) or "(no headlines fetched this time)"
 
-    user_msg = (
-        f"Location (via IP, approximate): {location}\n"
-        f"Connected to: {ssid}\n"
-        f"{battery_line}, up for {int(uptime_s) // 60} minutes\n\n"
-        f"Headlines I saw:\n{headline_block}\n\n"
-        "Write today's journal entry."
-    )
+    # Everything Flipee already knows, assembled into one briefing: its own
+    # history, this place, its notes, and which headlines are actually new.
+    # Without this the model has no way to tell its twelfth entry from its
+    # first, and writes the first one every time.
+    try:
+        user_msg, state = context.build(
+            device_id=device_id, city=city, region=region, country=country,
+            ssid=payload.get("ssid") or "", battery_pct=battery_pct,
+            uptime_s=uptime_s, headlines=headlines, local_time=local_time,
+            lat=lat, lon=lon,
+        )
+    except Exception as e:
+        # A briefing that can't be built shouldn't cost the flip its entry —
+        # fall back to the one-shot prompt this started as.
+        app.logger.warning("could not build context, falling back: %s", e)
+        state = None
+        headline_block = "\n".join(f"- {h}" for h in headlines) or "(no headlines this time)"
+        user_msg = (f"Location (via IP, approximate): {location}\n"
+                    f"Connected to: {ssid}\n\nHeadlines I saw:\n{headline_block}\n\n"
+                    "Write today's journal entry.")
 
     try:
         response = client.messages.create(
@@ -412,9 +464,21 @@ def reflect():
             headlines=headlines,
             model=MODEL,
             text=text,
+            local_time=local_time,
+            tz_offset_s=tz_offset_s if isinstance(tz_offset_s, int) else None,
+            lat=lat if isinstance(lat, (int, float)) else None,
+            lon=lon if isinstance(lon, (int, float)) else None,
         )
     except Exception as e:
         app.logger.warning("could not archive reflection: %s", e)
+
+    # Distil what's worth carrying forward — on a background thread, after
+    # the reply is built. The device is waiting on the entry, not on this.
+    if entry_id and state and MEMORY_ENABLED:
+        memory.update_async(
+            client, MEMORY_MODEL, device_id, state["place_key"], location,
+            text, headlines, logger=app.logger,
+        )
 
     return jsonify({"ok": True, "text": text, "id": entry_id})
 

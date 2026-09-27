@@ -400,6 +400,19 @@ String templatedReflection() {
   return String(buf);
 }
 
+// Local wall-clock time as Flipee actually sees it, for the relay.
+// Without this the relay only has its own UTC clock, and the model was
+// opening entries with "woke up this morning" at two in the afternoon.
+// Empty string if NTP hasn't landed yet — the relay treats that as
+// "no clock" rather than guessing.
+String localTimeString() {
+  struct tm t;
+  if (!getLocalTime(&t, 300)) return "";
+  char buf[48];
+  strftime(buf, sizeof(buf), "%A %Y-%m-%d %H:%M", &t);
+  return String(buf);
+}
+
 // A stable identity for this board, so the relay's archive can tell two
 // Flipees apart. Derived from the factory MAC burned into efuse, which
 // means it survives reflashing and doesn't need to be stored anywhere.
@@ -442,6 +455,14 @@ bool tryRelayReflection(String &outText) {
   doc["ssid"] = WiFi.SSID();
   doc["battery_pct"] = batteryPercent();
   doc["uptime_s"] = (uint32_t)(millis() / 1000);
+  // Anchors Flipee already worked out for itself but never passed on: its
+  // own clock, and the coordinates behind the city name. The relay uses
+  // them to place the entry in a real time of day, and to tell a genuine
+  // move from a re-geolocation of the same spot.
+  doc["local_time"] = localTimeString();
+  doc["tz_offset_s"] = (int32_t)gmtOffsetSec;
+  doc["lat"] = latitude;
+  doc["lon"] = longitude;
   JsonArray arr = doc["headlines"].to<JsonArray>();
   for (auto &h : headlines) arr.add(h);
   String body;
@@ -565,8 +586,14 @@ bool fetchLocation() {
 
 bool extractTitles(const String &xml, std::vector<String> &out, int maxItems) {
   out.clear();
-  int idx = xml.indexOf("<title>");
-  bool first = true; // the first <title> in the feed is the channel title, not a story
+  // Everything before the first <item> is channel metadata, and it holds
+  // *two* <title> tags, not one: the feed's own name, then a second one
+  // inside the <image> block. Skipping only the first let the literal
+  // string "Google News" through as headline #1 on every fetch — a wasted
+  // slot on screen, and a line the relay's model kept trying to react to.
+  int scan = xml.indexOf("<item>");
+  if (scan == -1) return false;
+  int idx = xml.indexOf("<title>", scan);
   while (idx != -1 && (int)out.size() < maxItems) {
     int start = idx + 7;
     int end = xml.indexOf("</title>", start);
@@ -575,11 +602,7 @@ bool extractTitles(const String &xml, std::vector<String> &out, int maxItems) {
     t.replace("<![CDATA[", "");
     t.replace("]]>", "");
     t.trim();
-    if (first) {
-      first = false;
-    } else if (t.length() > 0) {
-      out.push_back(t);
-    }
+    if (t.length() > 0) out.push_back(t);
     idx = xml.indexOf("<title>", end);
   }
   return out.size() > 0;
