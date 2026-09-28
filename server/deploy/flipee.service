@@ -1,0 +1,54 @@
+# Flipee relay — systemd unit for gunicorn.
+#
+# Edit the three paths and the User below, then:
+#
+#   sudo cp server/deploy/flipee.service /etc/systemd/system/flipee.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now flipee
+#   systemctl status flipee
+#   journalctl -u flipee -f
+#
+# Running `gunicorn ...` in a shell works right up until the shell closes
+# or the box reboots, and then the relay is gone with nothing to say so —
+# from the device's side that's indistinguishable from being out of
+# range. Hence a unit with Restart=always.
+
+[Unit]
+Description=Flipee relay (gunicorn)
+Documentation=https://github.com/Photon1c/flipee
+# The relay talks to api.anthropic.com and (once per new city) to
+# Wikipedia, so it wants real networking up, not just an interface.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=flipee
+Group=flipee
+
+# Must be the directory containing flipee_relay.py: python-dotenv loads
+# .env relative to the working directory, and .env is where the API key,
+# relay key and dashboard key live.
+WorkingDirectory=/opt/flipee/server
+ExecStart=/opt/flipee/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:5024 flipee_relay:app
+
+# Keep the archive outside the checkout so a redeploy, reclone or
+# `git clean` can't take the reflection history with it.
+Environment=FLIPEE_DB_PATH=/var/lib/flipee/flipee.sqlite3
+# The dashboard cookie is only marked Secure when TLS is actually in
+# front. On the tailnet there is none, so leave this unset — a Secure
+# cookie is never sent over plain HTTP and login would silently loop.
+# Environment=FLIPEE_DASHBOARD_HTTPS=1
+
+Restart=always
+RestartSec=3
+
+# The relay needs to read its checkout and write exactly one directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flipee
+
+[Install]
+WantedBy=multi-user.target

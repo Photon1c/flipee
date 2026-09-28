@@ -208,9 +208,36 @@ clone needs four things before it will serve anything:
    across first if you want its history to survive the move. Set
    `FLIPEE_DB_PATH` somewhere outside the checkout while you're there.
 
-Then gunicorn behind nginx, per the module docstring — don't expose
-5024 directly, and don't run plain HTTP on the public internet: the
-dashboard password and `X-Flipee-Key` both travel in the clear.
+Then gunicorn behind nginx — don't expose 5024 directly, and don't run
+plain HTTP on the public internet: the dashboard password and
+`X-Flipee-Key` both travel in the clear.
+
+`server/deploy/` has both pieces ready to copy:
+
+```
+sudo cp server/deploy/flipee.nginx.conf /etc/nginx/sites-available/flipee
+sudo ln -s /etc/nginx/sites-available/flipee /etc/nginx/sites-enabled/flipee
+sudo nginx -t && sudo systemctl reload nginx
+
+sudo cp server/deploy/flipee.service /etc/systemd/system/flipee.service
+sudo systemctl daemon-reload && sudo systemctl enable --now flipee
+```
+
+Edit the paths and `User=` in the unit first. Two things in there are
+worth not "simplifying" later:
+
+- **`nginx -t` before every reload.** A server block pointing at a
+  certificate that doesn't exist takes down the *entire* config, not
+  just its own site — which is exactly how this host once answered 500
+  on every path, including ones the app never returns 500 for.
+- **`proxy_set_header X-Forwarded-For $remote_addr`**, not the usual
+  `$proxy_add_x_forwarded_for`. The relay throttles failed dashboard
+  logins on the first value of that header; appending would let a client
+  supply its own first value and pick a new identity for every attempt.
+
+Run gunicorn from the unit rather than a shell. A relay that dies with
+your SSH session looks exactly like a relay that's out of range from the
+device's side — it just quietly writes templated reflections.
 
 **On a VPS** (recommended — works from any network Flipee forages onto):
 run the same `flipee_relay.py`, but behind a real WSGI server and a TLS
