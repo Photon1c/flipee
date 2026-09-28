@@ -76,6 +76,7 @@
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <SD.h>
+#include <SD_MMC.h> // current board revision wires the card slot as SDMMC, not SPI
 #include <time.h>
 #include <math.h>
 #include <vector>
@@ -158,8 +159,12 @@ const uint32_t WIFI_RETRY_MS           = 20000; // how often to rescan after a f
 // RELAY_TIMEOUT_MS and falls back to a templated reflection, by design, so
 // check secrets.h first if relay reflections quietly stop arriving.
 const char* SERVER_HOST = SERVER_HOST_VAL;
-const int SERVER_PORT = 5024;
-const bool RELAY_USE_TLS = false;  // Local LAN, no TLS
+// Port 80 because nginx on the VPS fronts gunicorn, and TLS is off because
+// the only route to that host is the tailnet — WireGuard already encrypts
+// the hop, and no CA will issue a cert for a 100.x address. Revisit both
+// when this gets a public domain: 443 and true.
+const int SERVER_PORT = 80;
+const bool RELAY_USE_TLS = false;
 const char* RELAY_KEY = RELAY_KEY_VAL;
 // Two different waits, and collapsing them into one number is why a
 // perfectly healthy relay used to fail every single time:
@@ -179,12 +184,31 @@ const uint32_t RELAY_TIMEOUT_MS         = 15000;
 // you nothing about which one it is.
 const char* DEVICE_NAME = "";
 
-// --- microSD journal (NOT verified against this board — confirm first) ---
+// --- microSD journal ---
+// Waveshare ships this board in two revisions with *different* SD wiring,
+// and their own driver (02_Example/Arduino/04_SD_Card/sd_card_bsp.cpp in
+// waveshareteam/ESP32-S3-AMOLED-1.91) picks between them at compile time.
+// Rather than make you identify your board by eye, setup() tries V2 and
+// falls back to V1, and says over serial which one mounted.
+//
+//   V2 (current stock): SDMMC in 1-bit mode — three pins, no chip select.
+//   V1 (older):         SPI.
+//
+// Note V1's clock is GPIO 47, which is also this sketch's LCD_SCLK. Those
+// can't both be right, so the SPI fallback refuses to run when its pins
+// collide with the display's rather than take the screen down with it —
+// if you're on a V1 board, the LCD mapping at the top needs revisiting
+// first.
 const bool ENABLE_SD = true;
-const int  SD_SCK  = -1; // TODO
-const int  SD_MISO = -1; // TODO
-const int  SD_MOSI = -1; // TODO
-const int  SD_CS   = -1; // TODO
+// V2 — SDMMC, 1-bit
+const int  SD_MMC_CLK = 9;
+const int  SD_MMC_CMD = 42;
+const int  SD_MMC_D0  = 8;
+// V1 — SPI
+const int  SD_SCK  = 47;
+const int  SD_MISO = 8;
+const int  SD_MOSI = 42;
+const int  SD_CS   = 9;
 
 // --- Battery ADC (optional — most builds won't have a wired divider) ---
 const bool  HAS_BATTERY_ADC        = false; // set true once ADC_PIN + ratio are confirmed
@@ -244,6 +268,12 @@ String lastWifiFailReason = "";
 volatile uint8_t lastDisconnectReason = 0; // raw esp_wifi reason code, set from the WiFi event task
 
 bool sdReady = false;
+// Whichever filesystem actually mounted. SDFS and SDMMCFS are both fs::FS,
+// so the journal code below is written against the base class and doesn't
+// care which revision of the board it ended up on. Null until setup()
+// mounts something; every caller is guarded by sdReady.
+fs::FS *sdfs = nullptr;
+String sdKind = "";
 bool locationKnown = false;
 String city = "", region = "", country = "", publicIp = "";
 float latitude = 0, longitude = 0;
@@ -338,8 +368,84 @@ int batteryPercent() {
 // ---------------------------------------------------------------------
 // SD journal
 // ---------------------------------------------------------------------
+// Try the current board revision first, then the older one. Reports which
+// worked, because "no SD" and "SD wired differently than I assumed" want
+// completely different responses from you and look identical otherwise.
+void mountSdCard() {
+  if (SD_MMC_CLK >= 0 && SD_MMC_CMD >= 0 && SD_MMC_D0 >= 0) {
+    SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+    // mode1bit=true: the slot is only wired for one data line on this
+    // board. format_if_mount_failed stays false — silently reformatting a
+    // card someone put their own files on would be an unpleasant surprise.
+    if (SD_MMC.begin("/sdcard", true, false)) {
+      sdReady = true;
+      sdfs = &SD_MMC;
+      sdKind = "SDMMC 1-bit (board rev V2)";
+    }
+  }
+
+  if (!sdReady) {
+    bool collides = (SD_SCK == LCD_SCLK || SD_MISO == LCD_SCLK || SD_MOSI == LCD_SCLK ||
+                     SD_CS == LCD_SCLK || SD_SCK == LCD_CS || SD_CS == LCD_CS);
+    if (SD_SCK < 0 || SD_MISO < 0 || SD_MOSI < 0 || SD_CS < 0) {
+      Serial.println("[sd] SDMMC didn't mount and the SPI pins are unset - no journal.");
+    } else if (collides) {
+      Serial.printf("[sd] SDMMC didn't mount. NOT trying the SPI fallback: its pins "
+                    "overlap the display (SD_SCK %d vs LCD_SCLK %d), and taking the "
+                    "screen down to probe for a card is a bad trade. If this really "
+                    "is a V1 board, fix the LCD mapping first.\n", SD_SCK, LCD_SCLK);
+    } else {
+      sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+      if (SD.begin(SD_CS, sdSPI)) {
+        sdReady = true;
+        sdfs = &SD;
+        sdKind = "SPI (board rev V1)";
+      }
+    }
+  }
+
+  // Kept apart from sdReady, which the write test below can revoke: a card
+  // that mounted but can't be written to needs a different message from no
+  // card at all.
+  bool mounted = sdReady;
+
+  if (sdReady) {
+    Serial.println("[sd] mounted: " + sdKind);
+    // Mounting proves the pins. It does not prove the card will hold a
+    // reflection: a write-protected, full, or dying card mounts perfectly
+    // and then silently drops every write. Since the whole point of the
+    // journal is to survive the relay being unreachable, find out now
+    // rather than the first time it matters.
+    const char *probe = "/flipee-write-test.tmp";
+    File t = sdfs->open(probe, FILE_WRITE);
+    if (!t) {
+      sdReady = false;
+      Serial.println("[sd] MOUNTED BUT NOT WRITABLE - card may be locked or full. "
+                     "Treating as no card, so nothing pretends to be journalled.");
+    } else {
+      t.print("flipee");
+      t.close();
+      File v = sdfs->open(probe, FILE_READ);
+      String back = v ? v.readString() : String("");
+      if (v) v.close();
+      sdfs->remove(probe);
+      if (back == "flipee") {
+        Serial.println("[sd] write test passed - reflections will be journalled.");
+      } else {
+        sdReady = false;
+        Serial.println("[sd] write test FAILED (read back \"" + back +
+                       "\") - treating as no card.");
+      }
+    }
+  }
+  if (!mounted) {
+    Serial.println("[sd] no card mounted - reflections will not be journalled. "
+                   "Check a card is inserted and formatted FAT32.");
+  }
+}
+
 void ensureDir(const char *path) {
-  if (!SD.exists(path)) SD.mkdir(path);
+  if (!sdfs->exists(path)) sdfs->mkdir(path);
 }
 
 bool dateStamp(char *out, size_t outLen, bool withTime) {
@@ -360,8 +466,8 @@ void logObservation(const String &line) {
   char day[16];
   if (!dateStamp(day, sizeof(day), false)) return;
   String path = "/flipee/" + String(day) + ".md";
-  bool isNew = !SD.exists(path);
-  File f = SD.open(path, FILE_APPEND);
+  bool isNew = !sdfs->exists(path);
+  File f = sdfs->open(path, FILE_APPEND);
   if (!f) return;
   if (isNew) {
     f.printf("# Flipee log — %s\n\n", day);
@@ -507,7 +613,7 @@ void writeReflection() {
     char stamp[24];
     if (dateStamp(stamp, sizeof(stamp), true)) {
       String path = "/flipee/reflections/" + String(stamp) + ".md";
-      File f = SD.open(path, FILE_WRITE);
+      File f = sdfs->open(path, FILE_WRITE);
       if (f) {
         f.printf("# Flipee reflection — %s\n\n", stamp);
         String loc = city.length() ? (city + ", " + region + ", " + country) : "unknown (no location fix yet)";
@@ -1141,13 +1247,7 @@ void setup() {
   }
   gfx->setRotation(DISPLAY_ROTATION);
 
-  if (ENABLE_SD && SD_SCK != -1 && SD_MISO != -1 && SD_MOSI != -1 && SD_CS != -1) {
-    sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    sdReady = SD.begin(SD_CS, sdSPI);
-    if (!sdReady) Serial.println("SD.begin() failed — check wiring/pins.");
-  } else if (ENABLE_SD) {
-    Serial.println("ENABLE_SD is true but SD_SCK/MISO/MOSI/CS are unset — skipping SD journal.");
-  }
+  if (ENABLE_SD) mountSdCard();
 
   if (HAS_BATTERY_ADC && BATTERY_ADC_PIN >= 0) {
     analogReadResolution(12);
