@@ -518,7 +518,20 @@ def reflect():
         in_tokens = getattr(usage, "input_tokens", None)
         out_tokens = getattr(usage, "output_tokens", None)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # The SDK stringifies every transport failure as a bare "Connection
+        # error." — true, and useless: blocked egress, a missing CA bundle,
+        # and a DNS failure are indistinguishable, and they want completely
+        # different fixes. The real reason is in the cause chain, so unwrap
+        # it into both the log and the response.
+        detail = str(e) or e.__class__.__name__
+        cause = e.__cause__ or e.__context__
+        seen = 0
+        while cause is not None and seen < 3:
+            detail += " <- %s: %s" % (cause.__class__.__name__, cause)
+            cause = cause.__cause__ or cause.__context__
+            seen += 1
+        app.logger.warning("model call failed: %s", detail, exc_info=True)
+        return jsonify({"ok": False, "error": detail}), 500
 
     # Archiving is best-effort and deliberately outside the try above: a
     # full disk or a locked database shouldn't cost the device a reflection
