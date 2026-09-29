@@ -74,6 +74,13 @@ CREATE TABLE IF NOT EXISTS reflections (
     -- Device-written entries are templated filler; the archivist pass will
     -- rewrite them properly later without touching created_utc.
     needs_polish INTEGER NOT NULL DEFAULT 0,
+    -- The archivist's rewrite, kept *beside* `text` rather than replacing
+    -- it. What Flipee actually wrote at the time is the record; a better
+    -- version written later is an enhancement, and conflating the two
+    -- would quietly make the archive unfalsifiable.
+    polished_text  TEXT NOT NULL DEFAULT '',
+    polished_utc   TEXT NOT NULL DEFAULT '',
+    polished_model TEXT NOT NULL DEFAULT '',
     text        TEXT    NOT NULL
 );
 -- What Flipee has worked out and wants to carry forward, distilled after
@@ -137,6 +144,9 @@ _ADDED_COLUMNS = (
     ("origin", "TEXT NOT NULL DEFAULT 'relay'"),
     ("entry_uid", "TEXT NOT NULL DEFAULT ''"),
     ("needs_polish", "INTEGER NOT NULL DEFAULT 0"),
+    ("polished_text", "TEXT NOT NULL DEFAULT ''"),
+    ("polished_utc", "TEXT NOT NULL DEFAULT ''"),
+    ("polished_model", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -454,6 +464,73 @@ def get_memory(device_id, pk):
         except (ValueError, TypeError):
             out[field] = []
     return out
+
+
+# =====================================================================
+# The archivist's side (see archivist.py)
+# =====================================================================
+
+def pending_polish(limit=20, device_id=None):
+    """Entries the archivist hasn't rewritten yet, oldest first.
+
+    Oldest first on purpose: polishing in the order things happened means
+    each rewrite can see the ones before it, the same way the device's own
+    entries did.
+    """
+    where, params = ["needs_polish = 1", "polished_text = ''"], []
+    if device_id:
+        where.append("device_id = ?")
+        params.append(device_id)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM reflections WHERE " + " AND ".join(where) +
+            " ORDER BY created_utc ASC, id ASC LIMIT ?", params + [int(limit)]
+        ).fetchall()
+    return [_row_to_entry(r) for r in rows]
+
+
+def entries_before(device_id, created_utc, limit=2, pk=None):
+    """The entries that preceded a given moment, newest first.
+
+    This is what lets the archivist rewrite an old entry honestly: what
+    Flipee knew *then* is reconstructable from the archive itself, because
+    it's ordered by when things happened rather than when they arrived.
+    """
+    where = ["device_id = ?", "created_utc < ?"]
+    params = [device_id, created_utc]
+    if pk:
+        where.append("place_key = ?")
+        params.append(pk)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM reflections WHERE " + " AND ".join(where) +
+            " ORDER BY created_utc DESC, id DESC LIMIT ?", params + [int(limit)]
+        ).fetchall()
+    return [_row_to_entry(r) for r in rows]
+
+
+def save_polish(entry_id, text, model):
+    """Record a rewrite. Never touches `text` or `created_utc`."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE reflections SET polished_text = ?, polished_utc = ?, "
+            "polished_model = ?, needs_polish = 0 WHERE id = ?",
+            (text, utc_now_iso(), model, int(entry_id)),
+        )
+
+
+def polish_stats(device_id=None):
+    clause, params = "", []
+    if device_id:
+        clause = " WHERE device_id = ?"
+        params.append(device_id)
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total,"
+            " SUM(CASE WHEN polished_text <> '' THEN 1 ELSE 0 END) AS polished,"
+            " SUM(CASE WHEN needs_polish = 1 AND polished_text = '' THEN 1 ELSE 0 END) AS pending"
+            " FROM reflections" + clause, params).fetchone()
+    return {k: (row[k] or 0) for k in ("total", "polished", "pending")}
 
 
 def memories(device_id=None):

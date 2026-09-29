@@ -54,7 +54,7 @@
 {% endif %}
 
 {% for e in entries %}
-  <article class="entry">
+  <article class="entry" id="e{{ e.id }}">
     <div class="meta">
       <a class="when" href="{{ url_for('entry', entry_id=e.id) }}">
         <time datetime="{{ e.created_utc }}" data-utc="{{ e.created_utc }}">{{ e.created_utc }}</time>
@@ -68,7 +68,21 @@
       {%- endif %}
       <span class="dim device">{{ e.device_name or e.device_id }}</span>
     </div>
-    <div class="text">{{ e.text }}</div>
+    {# Polished by default where it exists, because it's the better read —
+       but the original is always one click away and never overwritten. #}
+    {% set show_original = filters.show == 'as-written' or not e.polished_text %}
+    <div class="text">{{ e.text if show_original else e.polished_text }}</div>
+    {% if e.polished_text %}
+      <div class="versions dim">
+        {% if show_original %}
+          as Flipee wrote it ·
+          <a href="{{ url_for('dashboard', device=filters.device_id or None, day=filters.day or None, q=filters.place or None, page=filters.page) }}#e{{ e.id }}">read the archivist's rewrite</a>
+        {% else %}
+          rewritten by the archivist ·
+          <a href="{{ url_for('dashboard', device=filters.device_id or None, day=filters.day or None, q=filters.place or None, page=filters.page, show='as-written') }}#e{{ e.id }}">read what Flipee actually wrote</a>
+        {% endif %}
+      </div>
+    {% endif %}
     {% if e.headlines %}
       <details>
         <summary class="dim">{{ e.headlines|length }} headline{{ '' if e.headlines|length == 1 else 's' }} it was reacting to</summary>
@@ -109,6 +123,7 @@
      device adds its own structure around it, so there's nothing to render
      — but paragraph breaks still matter. */
   .entry .text { white-space: pre-wrap; }
+  .entry .versions { margin-top: 8px; font-size: 12px; }
   .entry details { margin-top: 12px; font-size: 13px; }
   .entry summary { cursor: pointer; }
   .entry details ul { margin: 8px 0 0; padding-left: 20px; color: var(--dim); }
