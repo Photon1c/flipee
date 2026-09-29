@@ -258,16 +258,20 @@ const uint32_t PAGE_TURN_COOLDOWN_MS = 500;
 // deliberate page turn isn't overwritten a moment later. 0 disables
 // auto-rotation and leaves it tilt-only (still wrapping).
 //
-// Tuned by reading it on the device rather than by guessing: 7s read as a
-// flicker, 14s was still hurried. 25s is a pace you can finish a headline
-// at and then think about it, which is the point of the thing.
+// Coupled to MESSAGE_TIMEOUT_MS above: auto-rotation deliberately doesn't
+// count as interaction, so the view drops to the idle clock on that timer
+// no matter what. Eight headlines wrap to ~30 lines at 9 a screen, and
+// because 9 and 30 share a factor the ring visits 10 distinct screens
+// before repeating. At 15s that full cycle is 150s and fits the timeout
+// exactly; at 25s it needs 250s, so four of the ten screens could never
+// be seen in one sitting.
 //
-// This is coupled to MESSAGE_TIMEOUT_MS above — auto-rotation
-// deliberately doesn't count as interaction, so the view drops to the
-// idle clock on that timer regardless. Raise one without the other and
-// you shorten how much of the feed is ever seen; at 25s into 150s that's
-// six screenfuls, comfortably more than eight headlines need.
-const uint32_t NEWS_AUTO_ROTATE_MS   = 25000;
+// Worth knowing how this got mistuned: it was raised 7s -> 14s -> 25s in
+// response to "too fast", but the display was actually being paged twice
+// a second by a tilt bug, and this timer was never involved. Tuning a
+// constant against a symptom it doesn't cause moves it a long way from
+// where it belongs.
+const uint32_t NEWS_AUTO_ROTATE_MS   = 15000;
 // rad/s — setup() calls imu.setGyroUnit_rads(true), so the library really
 // does hand back radians here. (Its own default is dps; don't trust the
 // library default, trust the call.)
@@ -370,6 +374,7 @@ int newsOffset = 0;
 uint32_t lastNewsRotateMs = 0;
 // False while a tilt is still being held, so one gesture turns one page.
 bool tiltArmed = true;
+uint32_t lastNewsDebugMs = 0;
 int pageCount = 0;   // kept for the "n/m" in the header
 int currentPage = 0;
 
@@ -1627,6 +1632,16 @@ void loop() {
         drawNewsPage();
       }
     }
+    // Temporary: the news view was reported as never advancing, and every
+    // path that could explain it reads correct on inspection. Print the
+    // actual state rather than guess again.
+    if (LOG_GYRO && now - lastNewsDebugMs > 5000) {
+      lastNewsDebugMs = now;
+      Serial.printf("[news] lines=%d perPage=%d offset=%d rotIn=%ldms idleIn=%ldms\n",
+                    (int)newsLines.size(), newsLinesPerPage, newsOffset,
+                    (long)NEWS_AUTO_ROTATE_MS - (long)(now - lastNewsRotateMs),
+                    (long)MESSAGE_TIMEOUT_MS - (long)(now - lastInteractionMs));
+    }
     // Auto-advance. Deliberately does NOT touch lastInteractionMs: the
     // view should still time out to the idle clock while nobody's
     // watching, rather than rotating to itself forever and keeping the
@@ -1634,6 +1649,7 @@ void loop() {
     if (NEWS_AUTO_ROTATE_MS && (int)newsLines.size() > newsLinesPerPage &&
         now - lastNewsRotateMs > NEWS_AUTO_ROTATE_MS) {
       rotateNews(+1);
+      Serial.printf("[news] rotated -> offset %d of %d\n", newsOffset, (int)newsLines.size());
       drawNewsPage();
     }
     if (now - lastInteractionMs > MESSAGE_TIMEOUT_MS) {
