@@ -159,12 +159,17 @@ const uint32_t WIFI_RETRY_MS           = 20000; // how often to rescan after a f
 // RELAY_TIMEOUT_MS and falls back to a templated reflection, by design, so
 // check secrets.h first if relay reflections quietly stop arriving.
 const char* SERVER_HOST = SERVER_HOST_VAL;
-// 5024 with no TLS: the relay is a `python flipee_relay.py` on the LAN,
-// listening directly rather than behind nginx. When the VPS gets a public
-// domain this becomes 443 and true — and note the device can only reach
-// that VPS once it's publicly routable, since it can't join the tailnet.
-const int SERVER_PORT = 5024;
-const bool RELAY_USE_TLS = false;
+// 443 over TLS: nginx on the VPS terminates a real Let's Encrypt
+// certificate for flipee.website and proxies to gunicorn. Both the
+// relay key and the dashboard password cross the open internet now, so
+// this is no longer optional the way it was on a LAN.
+//
+// Note the device still calls setInsecure() before the handshake, so it
+// encrypts but doesn't verify the certificate — it has no CA bundle and
+// no reliable clock at boot to check expiry against. The shared key is
+// what authenticates the relay; TLS is here for confidentiality.
+const int SERVER_PORT = 443;
+const bool RELAY_USE_TLS = true;
 const char* RELAY_KEY = RELAY_KEY_VAL;
 // Two different waits, and collapsing them into one number is why a
 // perfectly healthy relay used to fail every single time:
