@@ -243,6 +243,12 @@ const float    SHAKE_THRESHOLD_G     = 2.2f;   // total accel magnitude (g) that
 const uint32_t SHAKE_COOLDOWN_MS     = 1200;
 const float    PAGE_TILT_THRESHOLD   = 0.45f;  // pitch (sin of angle) that triggers a page turn
 const uint32_t PAGE_TURN_COOLDOWN_MS = 500;
+// The news view cycles on its own so the whole feed gets read without
+// being held and tilted, and so the screen is never parked on a
+// half-empty last page. Tilt still steers and resets this clock, so a
+// deliberate page turn isn't overwritten a moment later. 0 disables
+// auto-rotation and leaves it tilt-only (still wrapping).
+const uint32_t NEWS_AUTO_ROTATE_MS   = 7000;
 // rad/s — setup() calls imu.setGyroUnit_rads(true), so the library really
 // does hand back radians here. (Its own default is dps; don't trust the
 // library default, trust the call.)
@@ -329,8 +335,14 @@ uint32_t lastQueueFlushMs = 0;
 enum ViewState { VIEW_IDLE, VIEW_NEWS, VIEW_REFLECT, VIEW_SLEEP };
 ViewState currentView = VIEW_IDLE;
 
-std::vector<String> pageLines[24];
-int pageCount = 0;
+// The news view is a ring: every wrapped line in one list, plus an offset
+// into it. Drawing takes newsLinesPerPage lines from newsOffset and wraps
+// past the end, so the screen is always full and paging never dead-ends.
+std::vector<String> newsLines;
+int newsLinesPerPage = 1;
+int newsOffset = 0;
+uint32_t lastNewsRotateMs = 0;
+int pageCount = 0;   // kept for the "n/m" in the header
 int currentPage = 0;
 
 int lastDrawnMinute = -1;
@@ -1117,7 +1129,6 @@ void layoutHeadlines() {
   const int charsPerLine = max(1, usableW / charW);
   const int linesPerPage = max(1, usableH / lineH);
 
-  for (int i = 0; i < pageCount; i++) pageLines[i].clear();
   pageCount = 0;
 
   std::vector<String> allLines;
@@ -1147,14 +1158,20 @@ void layoutHeadlines() {
     if (h != headlines.size() - 1) allLines.push_back("");
   }
 
-  for (size_t i = 0; i < allLines.size() && pageCount < 24; i += linesPerPage) {
-    for (size_t j = i; j < allLines.size() && j < i + linesPerPage; j++) {
-      pageLines[pageCount].push_back(allLines[j]);
-    }
-    pageCount++;
-  }
-  if (pageCount == 0) pageCount = 1;
+  // Keep the wrapped lines whole and let drawNewsPage() take a window out
+  // of them, rather than pre-chopping into fixed pages.
+  //
+  // Chopping was what left dead space: the last page got whatever
+  // remainder was left over — often two lines on a screen that fits eight
+  // — and tilting forward there did nothing, because paging was bounded at
+  // pageCount - 1. As a ring there is no remainder and no last page.
+  newsLines = allLines;
+  newsLinesPerPage = linesPerPage;
+  // Still reported as "n/m" in the header, so it's clear how much there is
+  // to get through even though it now cycles.
+  pageCount = max(1, (int)((newsLines.size() + linesPerPage - 1) / linesPerPage));
   currentPage = 0;
+  newsOffset = 0;
 }
 
 // ---------------------------------------------------------------------
@@ -1329,6 +1346,23 @@ void drawIdle() {
   gfx->fillCircle(LCD_WIDTH - MARGIN - 4, LCD_HEIGHT - MARGIN - 4, 4, dotColor);
 }
 
+// Advance (or reverse) the ring by one screenful. One place so the timer
+// and the tilt can't drift apart, and so both restart the auto-rotate
+// clock — a tilt should hold what you just asked for, not get overwritten
+// half a second later.
+void rotateNews(int direction) {
+  int total = (int)newsLines.size();
+  if (total <= 0) return;
+  if (total > newsLinesPerPage) {
+    newsOffset = (newsOffset + direction * newsLinesPerPage) % total;
+    if (newsOffset < 0) newsOffset += total;
+  }
+  if (pageCount > 0) {
+    currentPage = (newsLinesPerPage > 0) ? (newsOffset / newsLinesPerPage) % pageCount : 0;
+  }
+  lastNewsRotateMs = millis();
+}
+
 void drawNewsPage() {
   gfx->fillScreen(theme.bg);
 
@@ -1341,9 +1375,19 @@ void drawNewsPage() {
   gfx->setTextColor(theme.fg);
   int y = MARGIN + 10 * TEXT_SIZE + MARGIN;
   int lineH = 10 * TEXT_SIZE;
-  for (auto &ln : pageLines[currentPage]) {
+  // A window onto the ring, wrapping past the end, so the screen fills
+  // even when the remaining lines wouldn't have.
+  int total = (int)newsLines.size();
+  for (int i = 0; total > 0 && i < newsLinesPerPage; i++) {
+    // Only wrap when there's more than a screenful; with three lines of
+    // "No headlines yet" this would otherwise repeat them to fill space.
+    int idx = newsOffset + i;
+    if (idx >= total) {
+      if (total <= newsLinesPerPage) break;
+      idx %= total;
+    }
     gfx->setCursor(MARGIN, y);
-    gfx->println(ln);
+    gfx->println(newsLines[idx]);
     y += lineH;
   }
 
@@ -1351,7 +1395,8 @@ void drawNewsPage() {
     gfx->setTextSize(1);
     gfx->setTextColor(theme.dim);
     gfx->setCursor(MARGIN, LCD_HEIGHT - MARGIN - 8);
-    gfx->print("tilt to page - shake to refresh");
+    gfx->print(NEWS_AUTO_ROTATE_MS ? "rotating - tilt to steer, shake to refresh"
+                                   : "tilt to page - shake to refresh");
   }
 }
 
@@ -1503,17 +1548,29 @@ void loop() {
 
   if (currentView == VIEW_NEWS) {
     if (now - lastPageTurnMs > PAGE_TURN_COOLDOWN_MS) {
-      if (pitchSin > PAGE_TILT_THRESHOLD && currentPage < pageCount - 1) {
-        currentPage++;
+      // No bounds check in either direction now — the ring wraps, so
+      // tilting forward on the last screenful returns to the first
+      // instead of doing nothing, which is what made it feel stuck.
+      if (pitchSin > PAGE_TILT_THRESHOLD) {
+        rotateNews(+1);
         lastPageTurnMs = now;
         lastInteractionMs = now;
         drawNewsPage();
-      } else if (pitchSin < -PAGE_TILT_THRESHOLD && currentPage > 0) {
-        currentPage--;
+      } else if (pitchSin < -PAGE_TILT_THRESHOLD) {
+        rotateNews(-1);
         lastPageTurnMs = now;
         lastInteractionMs = now;
         drawNewsPage();
       }
+    }
+    // Auto-advance. Deliberately does NOT touch lastInteractionMs: the
+    // view should still time out to the idle clock while nobody's
+    // watching, rather than rotating to itself forever and keeping the
+    // screen lit on a battery-powered device.
+    if (NEWS_AUTO_ROTATE_MS && (int)newsLines.size() > newsLinesPerPage &&
+        now - lastNewsRotateMs > NEWS_AUTO_ROTATE_MS) {
+      rotateNews(+1);
+      drawNewsPage();
     }
     if (now - lastInteractionMs > MESSAGE_TIMEOUT_MS) {
       currentView = VIEW_IDLE;
