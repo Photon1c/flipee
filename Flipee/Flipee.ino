@@ -159,11 +159,11 @@ const uint32_t WIFI_RETRY_MS           = 20000; // how often to rescan after a f
 // RELAY_TIMEOUT_MS and falls back to a templated reflection, by design, so
 // check secrets.h first if relay reflections quietly stop arriving.
 const char* SERVER_HOST = SERVER_HOST_VAL;
-// Port 80 because nginx on the VPS fronts gunicorn, and TLS is off because
-// the only route to that host is the tailnet — WireGuard already encrypts
-// the hop, and no CA will issue a cert for a 100.x address. Revisit both
-// when this gets a public domain: 443 and true.
-const int SERVER_PORT = 80;
+// 5024 with no TLS: the relay is a `python flipee_relay.py` on the LAN,
+// listening directly rather than behind nginx. When the VPS gets a public
+// domain this becomes 443 and true — and note the device can only reach
+// that VPS once it's publicly routable, since it can't join the tailnet.
+const int SERVER_PORT = 5024;
 const bool RELAY_USE_TLS = false;
 const char* RELAY_KEY = RELAY_KEY_VAL;
 // Two different waits, and collapsing them into one number is why a
@@ -178,6 +178,16 @@ const char* RELAY_KEY = RELAY_KEY_VAL;
 //     reflection instead.
 const uint32_t RELAY_CONNECT_TIMEOUT_MS = 2500;
 const uint32_t RELAY_TIMEOUT_MS         = 15000;
+// --- Offline queue ---
+// Reflections the relay never took are kept on the card and uploaded to
+// /archive whenever a network comes back. ARCHIVE_TIMEOUT_MS is much
+// shorter than RELAY_TIMEOUT_MS because /archive only writes a row —
+// there's no model call to wait on. The batch is small because flushing
+// happens from loop() and every POST blocks the display.
+const char*    QUEUE_DIR           = "/flipee/queue";
+const uint32_t QUEUE_FLUSH_MS      = 60000;
+const uint32_t ARCHIVE_TIMEOUT_MS  = 6000;
+const int      QUEUE_FLUSH_BATCH   = 2;
 // Optional friendly name for this board, shown in the relay's dashboard
 // instead of its auto-generated id (see deviceId() below). Worth setting
 // the day there's a second Flipee — "flipee-3fa91c" is stable but tells
@@ -289,6 +299,7 @@ int lastNewsHttpCode = 0;
 
 std::vector<String> headlines;
 uint32_t lastNewsFetchMs = 0;
+uint32_t lastQueueFlushMs = 0;
 
 enum ViewState { VIEW_IDLE, VIEW_NEWS, VIEW_REFLECT, VIEW_SLEEP };
 ViewState currentView = VIEW_IDLE;
@@ -506,6 +517,20 @@ String templatedReflection() {
   return String(buf);
 }
 
+// UTC, for stamping an entry at the moment it was written rather than the
+// moment it finally gets uploaded. Empty until NTP lands — an entry
+// written on a network with no route out genuinely has no time of its
+// own, and the relay would rather be told that than given a guess.
+String utcStamp() {
+  time_t now = time(nullptr);
+  if (now < 1700000000) return ""; // clock clearly not set yet
+  struct tm g;
+  gmtime_r(&now, &g);
+  char buf[24];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &g);
+  return String(buf);
+}
+
 // Local wall-clock time as Flipee actually sees it, for the relay.
 // Without this the relay only has its own UTC clock, and the model was
 // opening entries with "woke up this morning" at two in the afternoon.
@@ -532,7 +557,118 @@ String deviceId() {
   return String(buf);
 }
 
-bool tryRelayReflection(String &outText) {
+// The observations that go with any reflection, live or queued. One place
+// so a queued entry carries exactly what a live one would — an entry
+// uploaded three days late shouldn't be a thinner record than the rest.
+void fillObservation(JsonDocument &doc) {
+  doc["device_id"] = deviceId();
+  doc["device_name"] = DEVICE_NAME;
+  doc["city"] = city;
+  doc["region"] = region;
+  doc["country"] = country;
+  doc["ssid"] = WiFi.SSID();
+  doc["battery_pct"] = batteryPercent();
+  doc["uptime_s"] = (uint32_t)(millis() / 1000);
+  doc["local_time"] = localTimeString();
+  doc["tz_offset_s"] = (int32_t)gmtOffsetSec;
+  doc["lat"] = latitude;
+  doc["lon"] = longitude;
+  JsonArray arr = doc["headlines"].to<JsonArray>();
+  for (auto &h : headlines) arr.add(h);
+}
+
+// Park a reflection the relay never took, so it can be uploaded later.
+// Returns false if there's nowhere to put it — with no card there is no
+// queue, which is the honest answer rather than a silent drop.
+bool queueReflection(const String &uid, const String &text) {
+  if (!sdReady) {
+    Serial.println("[queue] no SD card - this reflection can't be kept for upload.");
+    return false;
+  }
+  ensureDir("/flipee");
+  ensureDir(QUEUE_DIR);
+
+  JsonDocument doc;
+  fillObservation(doc);
+  doc["entry_uid"] = uid;
+  doc["created_utc"] = utcStamp();
+  doc["text"] = text;
+
+  String path = String(QUEUE_DIR) + "/" + uid + ".json";
+  File f = sdfs->open(path, FILE_WRITE);
+  if (!f) {
+    Serial.println("[queue] couldn't open " + path);
+    return false;
+  }
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("[queue] held " + path + " for upload");
+  return true;
+}
+
+// Upload a few queued entries. Deliberately a few: this runs from loop()
+// and every POST is blocking, so draining a long backlog in one pass
+// would freeze the display. The rest keep until the next call.
+void flushQueue() {
+  if (!sdReady || WiFi.status() != WL_CONNECTED) return;
+  File dir = sdfs->open(QUEUE_DIR);
+  if (!dir || !dir.isDirectory()) return;
+
+  int sent = 0;
+  File entry = dir.openNextFile();
+  while (entry && sent < QUEUE_FLUSH_BATCH) {
+    String path = String(entry.path());
+    String body = entry.readString();
+    entry.close();
+
+    bool drop = false;
+    if (body.length() < 2) {
+      // An empty or truncated file is a write that died mid-way; it will
+      // never become valid, so don't retry it forever.
+      Serial.println("[queue] discarding unreadable " + path);
+      drop = true;
+    } else {
+      HTTPClient http;
+      String url = String(RELAY_USE_TLS ? "https://" : "http://") + SERVER_HOST +
+                   ":" + String(SERVER_PORT) + "/archive";
+      WiFiClientSecure secureClient;
+      bool began;
+      if (RELAY_USE_TLS) {
+        secureClient.setInsecure();
+        began = http.begin(secureClient, url);
+      } else {
+        began = http.begin(url);
+      }
+      if (began) {
+        http.addHeader("Content-Type", "application/json");
+        if (strlen(RELAY_KEY) > 0) http.addHeader("X-Flipee-Key", RELAY_KEY);
+        http.setConnectTimeout(RELAY_CONNECT_TIMEOUT_MS);
+        http.setTimeout(ARCHIVE_TIMEOUT_MS);
+        int code = http.POST(body);
+        if (code == 200) {
+          Serial.println("[queue] uploaded " + path);
+          drop = true;
+        } else if (code == 400) {
+          // The relay has looked at it and won't ever take it. Retrying
+          // is just a slower way of never succeeding.
+          Serial.printf("[queue] relay rejected %s (400) - discarding\n", path.c_str());
+          drop = true;
+        } else {
+          Serial.printf("[queue] %s not accepted yet (http %d)\n", path.c_str(), code);
+        }
+        http.end();
+        sent++;
+      }
+    }
+    if (drop) sdfs->remove(path);
+    entry = dir.openNextFile();
+  }
+  if (entry) entry.close();
+  dir.close();
+}
+
+bool tryRelayReflection(String &outText, bool &archived) {
+  archived = false;
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
   String url = String(RELAY_USE_TLS ? "https://" : "http://") + SERVER_HOST + ":" + String(SERVER_PORT) + "/reflect";
@@ -553,24 +689,7 @@ bool tryRelayReflection(String &outText) {
   http.setConnectTimeout(RELAY_CONNECT_TIMEOUT_MS);
 
   JsonDocument doc;
-  doc["device_id"] = deviceId();
-  doc["device_name"] = DEVICE_NAME;
-  doc["city"] = city;
-  doc["region"] = region;
-  doc["country"] = country;
-  doc["ssid"] = WiFi.SSID();
-  doc["battery_pct"] = batteryPercent();
-  doc["uptime_s"] = (uint32_t)(millis() / 1000);
-  // Anchors Flipee already worked out for itself but never passed on: its
-  // own clock, and the coordinates behind the city name. The relay uses
-  // them to place the entry in a real time of day, and to tell a genuine
-  // move from a re-geolocation of the same spot.
-  doc["local_time"] = localTimeString();
-  doc["tz_offset_s"] = (int32_t)gmtOffsetSec;
-  doc["lat"] = latitude;
-  doc["lon"] = longitude;
-  JsonArray arr = doc["headlines"].to<JsonArray>();
-  for (auto &h : headlines) arr.add(h);
+  fillObservation(doc);
   String body;
   serializeJson(doc, body);
 
@@ -587,6 +706,11 @@ bool tryRelayReflection(String &outText) {
     if (!deserializeJson(resp, http.getString())) {
       outText = String((const char *)(resp["text"] | ""));
       ok = outText.length() > 0;
+      // The relay archives what it writes, but archiving is best-effort on
+      // its side — a locked database still returns the text with a null
+      // id. Treat that as "not kept" and queue it, or the one entry nobody
+      // has a copy of is the one that looked like it worked.
+      archived = ok && !resp["id"].isNull();
     }
   }
   if (ok) {
@@ -604,7 +728,8 @@ void writeReflection() {
   drawReflecting();
 
   String reflectionText;
-  bool fromRelay = tryRelayReflection(reflectionText);
+  bool relayArchived = false;
+  bool fromRelay = tryRelayReflection(reflectionText, relayArchived);
   if (!fromRelay) reflectionText = templatedReflection();
 
   if (sdReady) {
@@ -612,6 +737,10 @@ void writeReflection() {
     ensureDir("/flipee/reflections");
     char stamp[24];
     if (dateStamp(stamp, sizeof(stamp), true)) {
+      // Anything the relay didn't take gets held for upload. That's every
+      // reflection written out of range — the whole point of foraging is
+      // that this is the normal case, not the exception.
+      if (!relayArchived) queueReflection(String(stamp), reflectionText);
       String path = "/flipee/reflections/" + String(stamp) + ".md";
       File f = sdfs->open(path, FILE_WRITE);
       if (f) {
@@ -1273,6 +1402,12 @@ void loop() {
       lastScanAttemptMs = now;
       scanAndConnect();
     }
+  } else if (wifiState == WIFI_CONNECTED_STATE && now - lastQueueFlushMs > QUEUE_FLUSH_MS) {
+    // Whenever there's a network, try to hand over anything written
+    // without one. Checked before the news refresh because a backlog of
+    // reflections nobody else has a copy of matters more than headlines.
+    lastQueueFlushMs = now;
+    flushQueue();
   } else if (wifiState == WIFI_CONNECTED_STATE && now - lastNewsFetchMs > NEWS_REFRESH_MS) {
     fetchNews();
     if (currentView == VIEW_IDLE) drawIdle();
