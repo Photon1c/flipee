@@ -60,11 +60,52 @@ COMMON = {
     "thursday", "friday", "saturday", "sunday", "january", "february",
     "march", "april", "may", "june", "july", "august", "september",
     "october", "november", "december",
+    # Clock suffixes: the time itself is stripped before the number check,
+    # which leaves "PM" behind looking like a proper noun.
+    "am", "pm", "a.m", "p.m",
 }
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 _WORD = re.compile(r"[A-Za-z][A-Za-z'’\-]*")
 _NUMBER = re.compile(r"\d[\d,.]*")
+_CLOCK = re.compile(r"\b\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?", re.I)
+
+# Spelled-out numbers, because a fabricated quantity doesn't announce
+# itself with digits. The entry that claimed "I've been here nineteen
+# days" — when its briefing said 2.3 — sailed past a digits-only check.
+_UNITS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+# "hundred"/"thousand"/"dozen" are counted as quantity words but not given
+# a value — "two hundred" isn't 2+100, and guessing wrong would be worse
+# than not guessing.
+_MAGNITUDES = {"hundred", "thousand", "million", "dozen"}
+# Deliberately excluded: "one". It's a pronoun and an article far more
+# often than a count ("one of the", "no one", "the one that stuck"), and
+# flagging every instance would bury the real finds.
+_NUMBER_WORDS = set(_UNITS) | set(_TENS) | _MAGNITUDES
+
+
+def _word_number(token):
+    """(value, True) for a spelled-out number, (None, False) if it isn't one.
+
+    Handles 'nineteen' and 'twenty-five'; returns no value for magnitudes,
+    which still count as quantities worth checking.
+    """
+    parts = [p for p in token.lower().split("-") if p]
+    if not parts or not all(p in _NUMBER_WORDS for p in parts):
+        return None, False
+    if any(p in _MAGNITUDES for p in parts):
+        return None, True
+    total = 0
+    for p in parts:
+        total += _UNITS.get(p, 0) or _TENS.get(p, 0)
+    return (total or None), True
 
 
 def sources_for(device_id, pk):
@@ -81,13 +122,19 @@ def sources_for(device_id, pk):
     return "\n".join(p for p in parts if p)
 
 
-_POSSESSIVE = re.compile(r"['’]s$")
+_CONTRACTION = re.compile(r"['’].*$")
 
 
 def _normalize(word):
-    """'Way's' and 'Way' are the same word for grounding purposes — without
-    this, any possessive reads as a name no source mentions."""
-    return _POSSESSIVE.sub("", word.lower())
+    """Reduce a token to the word a source would have to contain.
+
+    Everything from an apostrophe on is dropped, which covers both the
+    possessive ("Federal Way's" must match a source's "Way") and
+    contractions ("I'm" is the pronoun "I", not a proper noun that no
+    source mentions — it was firing on nearly every first-person
+    sentence, which is most of them).
+    """
+    return _CONTRACTION.sub("", word.lower())
 
 
 def _vocabulary(source_text):
@@ -107,17 +154,38 @@ def _check(sentence, vocab, numbers):
     if any(w in DIRECTION_WORDS for w in lowered) or any(w in DISTANCE_WORDS for w in lowered):
         reasons.append("spatial claim — check it against a map")
 
+    # Clock times are read off the device's own clock, which is a source
+    # the headlines and place summary know nothing about. "8:32 PM" is the
+    # one number in an entry that's guaranteed not to be invented.
+    without_clocks = _CLOCK.sub(" ", sentence)
     unsourced_numbers = [n for n in
-                         (x.replace(",", "").rstrip(".") for x in _NUMBER.findall(sentence))
+                         (x.replace(",", "").rstrip(".") for x in _NUMBER.findall(without_clocks))
                          if n not in numbers]
+
+    # Same test for spelled-out numbers, but check the digit form too: a
+    # source that says "40 displaced" grounds an entry that says "forty",
+    # and flagging that would be a false positive of exactly the kind
+    # that teaches people to ignore highlights.
+    for token in words:
+        value, is_number = _word_number(token)
+        if not is_number:
+            continue
+        if _normalize(token) in vocab:
+            continue
+        if value is not None and str(value) in numbers:
+            continue
+        unsourced_numbers.append(token)
+
     if unsourced_numbers:
         reasons.append("number not in any headline or place summary: "
                        + ", ".join(sorted(set(unsourced_numbers))[:3]))
 
     # Skip the first word: sentence-initial capitalization says nothing.
+    # Single letters are initials, list markers, or punctuation artifacts —
+    # never a name whose absence from the sources means anything.
     names = [w for w in words[1:]
-             if w[:1].isupper() and _normalize(w) not in COMMON
-             and _normalize(w) not in vocab]
+             if len(_normalize(w)) > 1 and w[:1].isupper()
+             and _normalize(w) not in COMMON and _normalize(w) not in vocab]
     if names:
         reasons.append("not mentioned by any source it read: "
                        + ", ".join(sorted(set(names))[:3]))
