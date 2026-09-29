@@ -1,0 +1,51 @@
+# VPS-adapted nginx config for srv1313560
+# Differences from deploy/flipee.nginx.conf:
+#   - Binds to 185.211.4.97:443 explicitly (not 0.0.0.0:443)
+#     Reason: Tailscale owns 100.70.36.88:443; nginx cannot bind 0.0.0.0:443
+#   - Domain: flipee.website (purchased 2026-09-29)
+#   - TLS cert: Let's Encrypt via certbot --webroot
+#   - ACME challenge served from /var/www/html (for renewal)
+#   - HTTP port 80 kept for ACME renewal only (redirects not needed)
+
+upstream flipee_relay {
+    server 127.0.0.1:5024;
+}
+
+server {
+    listen 80;
+    server_name flipee.website;
+
+    # Certbot ACME challenge (renewal via --webroot)
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        proxy_pass http://flipee_relay;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+}
+
+server {
+    # Bind to public IP only — Tailscale owns 100.70.36.88:443
+    listen 185.211.4.97:443 ssl;
+    server_name flipee.website;
+
+    ssl_certificate /etc/letsencrypt/live/flipee.website/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/flipee.website/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    location / {
+        proxy_pass http://flipee_relay;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+}

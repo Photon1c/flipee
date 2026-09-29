@@ -1,0 +1,29 @@
+# VPS-adapted relay service for srv1313560
+# Differences from deploy/flipee.service:
+#   - User: sherlockhums (no dedicated flipee user on this VPS)
+#   - WorkingDirectory: ~/temporary_shuttle/flipee/server (not /opt/flipee)
+#   - Venv: server/venv/ (pinned anthropic==0.40.0 — avoids httpx2 conflict)
+#   - EnvironmentFile: loads .env directly (no /var/lib/flipee separation)
+#   - No ProtectHome/ProtectSystem/ReadWritePaths restrictions
+
+[Unit]
+Description=Flipee relay (gunicorn)
+Documentation=https://github.com/Photon1c/flipee
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=sherlockhums
+
+WorkingDirectory=/home/sherlockhums/temporary_shuttle/flipee/server
+ExecStart=/home/sherlockhums/temporary_shuttle/flipee/server/venv/bin/gunicorn \
+          --workers 2 --bind 127.0.0.1:5024 flipee_relay:app
+
+EnvironmentFile=/home/sherlockhums/temporary_shuttle/flipee/server/.env
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

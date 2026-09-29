@@ -1,0 +1,26 @@
+# VPS-adapted archivist service for srv1313560
+# Differences from deploy/flipee-archivist.service:
+#   - User: sherlockhums (no dedicated flipee user on this VPS)
+#   - WorkingDirectory: ~/temporary_shuttle/flipee/server (not /opt/flipee)
+#   - Venv: server/venv/ (created via python3 -m venv, pinned anthropic==0.40.0)
+#   - EnvironmentFile: loads .env directly (no /var/lib/flipee separation)
+#   - No ProtectHome/ProtectSystem (sherlockhums owns the checkout)
+
+[Unit]
+Description=Flipee archivist (rewrite offline entries)
+Documentation=https://github.com/Photon1c/flipee
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sherlockhums
+
+WorkingDirectory=/home/sherlockhums/temporary_shuttle/flipee/server
+ExecStart=/home/sherlockhums/temporary_shuttle/flipee/server/venv/bin/python \
+          /home/sherlockhums/temporary_shuttle/flipee/server/archivist.py \
+          --once --limit 10
+
+EnvironmentFile=/home/sherlockhums/temporary_shuttle/flipee/server/.env
+
+TimeoutStartSec=600
