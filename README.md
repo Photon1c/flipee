@@ -335,6 +335,75 @@ than `flipee-3fa91c` once there's more than one. Archiving is
 best-effort: if the database is locked or the disk is full, the device
 still gets its reflection, it just won't show up here.
 
+## When the relay can't be reached
+
+Foraging means the relay is often unreachable — a network with no route
+out, a captive portal, a relay that's down. That used to cost you the
+reflection entirely: Flipee wrote a templated one from its own set of
+lines, showed it for sixty seconds, and that was the end of it.
+
+Now every reflection the relay didn't take is written to
+`/flipee/queue/` on the card as JSON alongside the readable `.md`, and
+uploaded to the relay's `POST /archive` whenever a network comes back —
+a couple at a time, every 60 seconds, because the flush runs from
+`loop()` and each upload blocks the display.
+
+**The timestamp is when it was written, not when it arrived.** An entry
+written on Tuesday and uploaded on Thursday belongs on Tuesday, or the
+archive quietly becomes a log of connectivity rather than a diary. It's
+also what makes the archivist below possible at all.
+
+Two details that matter more than they look:
+
+- **Retries are idempotent.** A device that loses the response to a
+  successful upload can't tell that from a failure, so it retries. A
+  unique index on `(device_id, entry_uid)` turns the retry into a no-op
+  that returns the existing id.
+- **A relay that answers but doesn't archive still gets queued.**
+  Archiving is best-effort server-side, so a locked database returns the
+  text with a null `id`. Trusting `200 OK` would mean the one entry
+  nobody has a copy of is the one that looked like it worked.
+
+### The archivist
+
+Queued entries are durable and correctly timestamped, and they read like
+filler, because they're a template with a headline dropped in.
+`archivist.py` is a **separate process** that rewrites them into the
+entry Flipee would have written if the relay had answered:
+
+```
+python server/archivist.py --once      # one pass
+python server/archivist.py --dry-run   # what it would rewrite, no model calls
+python server/archivist.py --loop      # for hosts without systemd
+```
+
+On a VPS, run it from the timer rather than a loop:
+
+```
+sudo cp server/deploy/flipee-archivist.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now flipee-archivist.timer
+systemctl list-timers flipee-archivist.timer
+```
+
+`FLIPEE_DB_PATH` in that unit **must** match the relay's, or the
+archivist polishes a different, empty database and reports nothing to
+do.
+
+The rewrite goes in `polished_text`, *beside* the original — `text`
+stays exactly what the device wrote. Collapsing the two would make the
+archive unfalsifiable, which is the one thing an archive can't afford.
+The dashboard shows the rewrite where one exists with a link to the
+original, and `?show=as-written` pins it the other way.
+
+**It writes from the moment, not from now.** The easy implementation
+hands the model everything Flipee knows today and lets it rewrite last
+Tuesday, producing an entry that subtly knows things it couldn't have.
+Instead the briefing is reconstructed as of the entry's own timestamp:
+`entries_before()` returns only what preceded it, and headlines are
+split new-vs-seen against those. Place background is the one deliberate
+exception — a city's location was as true then as now.
+
 ## Why the entries build on each other
 
 The first version of the relay sent one request's worth of facts and

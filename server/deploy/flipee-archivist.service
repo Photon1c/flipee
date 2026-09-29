@@ -1,0 +1,55 @@
+# Flipee archivist — one pass over the pending entries, then exit.
+#
+# Driven by flipee-archivist.timer, not enabled directly. Install both:
+#
+#   sudo cp server/deploy/flipee-archivist.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now flipee-archivist.timer
+#
+#   systemctl list-timers flipee-archivist.timer   # when it next runs
+#   journalctl -u flipee-archivist -n 50           # what it rewrote
+#   sudo systemctl start flipee-archivist          # run one pass right now
+#
+# Type=oneshot with a timer rather than `--loop` with Restart=always. The
+# work is periodic and bulk: there's nothing to keep warm between passes,
+# a crash should be a failed run rather than a restart storm, and
+# `list-timers` answers "when does this next happen" without reading any
+# code. archivist.py --loop exists for environments with no systemd.
+
+[Unit]
+Description=Flipee archivist (rewrite offline entries)
+Documentation=https://github.com/Photon1c/flipee
+# Needs the Anthropic API, so real connectivity rather than just an
+# interface. Runs happily whether or not the relay is up — it only shares
+# the database.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=flipee
+Group=flipee
+
+# Same directory as the relay: archivist.py reads the same .env for
+# ANTHROPIC_API_KEY.
+WorkingDirectory=/opt/flipee/server
+ExecStart=/opt/flipee/.venv/bin/python /opt/flipee/server/archivist.py --once --limit 10
+
+# MUST match the relay's FLIPEE_DB_PATH. Point this somewhere else and
+# the archivist will cheerfully polish a different, empty database and
+# report that it found nothing to do.
+Environment=FLIPEE_DB_PATH=/var/lib/flipee/flipee.sqlite3
+
+# Both processes write to the same SQLite file. That's fine — writes are
+# short and store.connect() waits up to 5s for a lock — but it's why the
+# archivist takes small batches instead of holding a long transaction
+# while a device is waiting on /reflect.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flipee
+
+# One pass is a handful of short model calls; if it's still going after
+# ten minutes something is wrong and the next timer tick can retry.
+TimeoutStartSec=600
