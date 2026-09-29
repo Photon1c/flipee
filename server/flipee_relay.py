@@ -111,6 +111,7 @@ import anthropic
 
 import context
 import memory
+import ollama_backend
 import review
 import store
 
@@ -129,6 +130,12 @@ MAX_TOKENS = 400
 # turn the whole mechanism off and go back to one call per flip.
 MEMORY_MODEL = os.environ.get("FLIPEE_MEMORY_MODEL", "claude-haiku-4-5-20251001")
 MEMORY_ENABLED = os.environ.get("FLIPEE_MEMORY", "1").strip().lower() not in ("0", "false", "no")
+# Which writer produces live reflections: "anthropic" (default) or
+# "ollama-cloud" (see ollama_backend.py). Only this path is switchable —
+# the archivist stays on Claude, because its rewrite is asynchronous, so
+# latency is free and prose quality is the only thing that matters there.
+REFLECTION_BACKEND = os.environ.get("REFLECTION_BACKEND", "anthropic").strip().lower()
+ANTHROPIC_FALLBACK = os.environ.get("ANTHROPIC_FALLBACK", "true").strip().lower() not in ("0", "false", "no")
 RELAY_KEY = os.environ.get("FLIPEE_RELAY_KEY", "")
 DASHBOARD_KEY = os.environ.get("FLIPEE_DASHBOARD_KEY", "")
 DASHBOARD_HTTPS = os.environ.get("FLIPEE_DASHBOARD_HTTPS", "").strip() in ("1", "true", "yes")
@@ -563,6 +570,45 @@ def archive():
     return jsonify({"ok": True, "id": entry_id, "stamped_by_device": stamped_by_device})
 
 
+def generate_reflection(system, user_msg):
+    """Write one reflection. Returns (text, model_used, in_tokens, out_tokens).
+
+    The fallback is the whole point of having two writers, and it only
+    helps if it lands inside the device's budget. Flipee waits
+    RELAY_TIMEOUT_MS (15s) and then writes its own template, so an Ollama
+    attempt that burns 12s before failing leaves no room for Anthropic's
+    ~4.5s and the flip gets a template anyway — a fallback that exists
+    but never arrives. ollama_backend defaults to 7s for that reason;
+    raising OLLAMA_TIMEOUT past ~9s quietly disables the safety net it
+    looks like it's protecting.
+    """
+    if REFLECTION_BACKEND == "ollama-cloud":
+        try:
+            text, in_tokens, out_tokens = ollama_backend.generate(
+                system, user_msg, MAX_TOKENS)
+            return (context.clean_entry_text(text), ollama_backend.MODEL,
+                    in_tokens, out_tokens)
+        except Exception as e:
+            if not ANTHROPIC_FALLBACK:
+                raise
+            # Logged at warning, not info: a backend silently failing over
+            # on every request looks identical to one that works, and the
+            # only visible difference would be the model column.
+            app.logger.warning("ollama backend failed (%s) — falling back to %s",
+                               e, MODEL)
+
+    response = client.messages.create(
+        model=MODEL, max_tokens=MAX_TOKENS, system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    text = context.clean_entry_text(
+        "".join(block.text for block in response.content if block.type == "text"))
+    usage = getattr(response, "usage", None)
+    return (text, MODEL,
+            getattr(usage, "input_tokens", None),
+            getattr(usage, "output_tokens", None))
+
+
 @app.route("/reflect", methods=["POST"])
 def reflect():
     blocked = device_auth_error()
@@ -614,22 +660,14 @@ def reflect():
                     "Write today's journal entry.")
 
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        text = context.clean_entry_text(
-            "".join(block.text for block in response.content if block.type == "text"))
+        # Real usage is archived per entry, from whichever writer produced
+        # it. The briefing is bounded by design, but "should be bounded"
+        # and "is bounded" are different claims — this is what makes the
+        # second one checkable as the archive grows.
+        text, model_used, in_tokens, out_tokens = generate_reflection(
+            SYSTEM_PROMPT, user_msg)
         if not text:
             return jsonify({"ok": False, "error": "empty response from model"}), 502
-        # Real usage, archived per entry. The briefing is bounded by design,
-        # but "should be bounded" and "is bounded" are different claims —
-        # this is what makes the second one checkable as the archive grows.
-        usage = getattr(response, "usage", None)
-        in_tokens = getattr(usage, "input_tokens", None)
-        out_tokens = getattr(usage, "output_tokens", None)
 
         # Flag-and-keep, deliberately not retry-and-fix. A figure the
         # briefing doesn't support is worth catching — one entry claimed
@@ -674,7 +712,9 @@ def reflect():
             battery_pct=battery_pct if isinstance(battery_pct, int) and battery_pct >= 0 else None,
             uptime_s=int(uptime_s) if isinstance(uptime_s, int) else None,
             headlines=headlines,
-            model=MODEL,
+            # Which writer actually produced this one, so the two can be
+            # compared in the archive rather than by recollection.
+            model=model_used,
             text=text,
             local_time=local_time,
             tz_offset_s=tz_offset_s if isinstance(tz_offset_s, int) else None,
@@ -712,6 +752,14 @@ def health():
         "service": "flipee_relay",
         "endpoint": "POST /reflect",
         "dashboard": "/" if DASHBOARD_KEY else "not configured (set FLIPEE_DASHBOARD_KEY)",
+        # Which writer is configured, so "why does this read differently
+        # today" is answerable without SSH-ing in to read .env. Note this
+        # reports intent, not outcome — a backend that fails over on every
+        # request still shows here; the per-entry `model` column is what
+        # records what actually wrote each one.
+        "backend": REFLECTION_BACKEND,
+        "model": ollama_backend.MODEL if REFLECTION_BACKEND == "ollama-cloud" else MODEL,
+        "fallback": MODEL if ANTHROPIC_FALLBACK and REFLECTION_BACKEND != "anthropic" else None,
     })
 
 

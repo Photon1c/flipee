@@ -227,3 +227,48 @@ No device firmware changes needed. No DB schema changes needed.
 ---
 
 *Spec ready for implementation. Pull from `main` branch before starting.*
+
+---
+
+## Implementation notes (2026-09-29, applied)
+
+Implemented on `main`, with five deviations from the spec above. Kept
+here rather than silently diverging:
+
+1. **`OLLAMA_TIMEOUT` is 7, not 12.** The constraint isn't
+   `< RELAY_TIMEOUT_MS/1000`; it's that the Ollama attempt *plus* the
+   Anthropic fallback (~4.5s measured) must fit inside the device's 15s,
+   or the fallback runs but arrives after Flipee has already written its
+   own template. At 12 the safety net exists and never catches anything.
+
+2. **stdlib `urllib`, not `httpx`.** The relay's one outage was an
+   httpx2/httpcore2 conflict, fixed by pinning `anthropic==0.40.0`.
+   Importing httpx directly makes that pin load-bearing for a second
+   reason. `place.py` already talks HTTP over urllib; no new dependency.
+
+3. **The `/reflect` snippet was written against an older handler** and
+   would have reverted four fixes: `clean_entry_text()`, per-entry token
+   accounting, the unsourced-number flagging, and the exception
+   cause-chain unwrapping. The backend choice now lives in
+   `generate_reflection()` so the handler around it is untouched.
+   (Also `store.add` is `store.save`, and `content[0].text` drops the
+   join over text blocks.)
+
+4. **No `temperature`.** The Anthropic path sets none. Changing sampling
+   and model together makes the A/B unattributable.
+
+5. **Ollama usage is mapped** from `usage.prompt_tokens` /
+   `completion_tokens` into `in_tokens`/`out_tokens`, or half the
+   archive would record no cost at all.
+
+Two corrections to the verification steps: the DB is at
+`/var/lib/flipee/flipee.sqlite3` per `FLIPEE_DB_PATH` in the unit, not
+`~/temporary_shuttle/...`; and the payload field is `battery_pct`, not
+`battery`.
+
+On the framing: measured cost is **$0.87 per 100 flips**, so the saving
+is real but small. The better reason to run this is variety — and there
+is already an objective quality signal for the A/B, since `/reflect`
+flags entries whose numbers the briefing doesn't support. A backend with
+a higher flag rate is following instructions worse, which beats a taste
+judgement.
