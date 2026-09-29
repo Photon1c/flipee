@@ -509,6 +509,41 @@ def entries_before(device_id, created_utc, limit=2, pk=None):
     return [_row_to_entry(r) for r in rows]
 
 
+def clear_polish(entry_id):
+    """Drop a rewrite so the archivist will do it again.
+
+    Wanted every time the archivist's prompt changes: a rewrite made
+    under the old wording is stale, and the alternative is hand-editing
+    the database. Never touches `text` — the original is not ours to
+    discard.
+    """
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE reflections SET polished_text = '', polished_utc = '', "
+            "polished_model = '', needs_polish = 1 WHERE id = ?", (int(entry_id),))
+        return cur.rowcount
+
+
+def count_entries_before(device_id, created_utc, pk=None):
+    """How many entries preceded a moment. A count, not a length.
+
+    entries_before() takes a limit because it returns rows for a prompt;
+    deriving "this was entry number N" from len() of that list silently
+    caps N at the limit. The archivist's briefing said "entry number 9"
+    for what was actually the 21st, and the rewrite repeated it — a
+    fabricated-looking figure that the model had been handed.
+    """
+    where = ["device_id = ?", "created_utc < ?"]
+    params = [device_id, created_utc]
+    if pk:
+        where.append("place_key = ?")
+        params.append(pk)
+    with connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM reflections WHERE " + " AND ".join(where), params
+        ).fetchone()[0]
+
+
 def save_polish(entry_id, text, model):
     """Record a rewrite. Never touches `text` or `created_utc`."""
     with connect() as conn:
