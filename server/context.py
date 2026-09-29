@@ -28,8 +28,30 @@ Everything here is cheap: indexed counts, one cached HTTP lookup, and
 text the relay already had.
 """
 
+import re
+
 import store
 import place
+
+# A label line from the briefing — "[2026-09-27T11:56:32Z, from Federal
+# Way, Washington, United States]" — reproduced at the top of an entry.
+_LABEL_LINE = re.compile(r"^\s*\[[^\]\n]{0,120}\]\s*$")
+
+
+def clean_entry_text(text):
+    """Strip briefing formatting the model copied into its own entry.
+
+    The recent-entries block labels each sample with a bracketed
+    timestamp so the model can tell them apart. At least once it
+    reproduced that label as the first line of a new entry, and the
+    archive kept it verbatim — an entry that opens with someone else's
+    timestamp. Telling the model not to do it is the real fix; this is
+    the cheap guard for when it does anyway.
+    """
+    lines = (text or "").split("\n")
+    while lines and (not lines[0].strip() or _LABEL_LINE.match(lines[0])):
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 # How much history goes in the prompt. Two full entries is enough to hold
 # a voice and a thread without the model simply paraphrasing yesterday —
@@ -196,8 +218,11 @@ def build_blocks(device_id, city, region, country, ssid, battery_pct, uptime_s,
             parts.append("[%s, from %s]\n%s" % (
                 entry["created_utc"], entry["location"], text))
         blocks.append("YOUR LAST ENTRIES, VERBATIM\n" + "\n\n".join(parts) +
-                      "\n\nDon't echo their openings, their structure, or their "
-                      "closing moves. You already made those.")
+                      "\n\nThe bracketed lines are labels so you can tell them "
+                      "apart — they are not part of an entry and must never "
+                      "appear in what you write. Don't echo their openings, "
+                      "their structure, or their closing moves either. You "
+                      "already made those.")
 
     if fresh:
         blocks.append("HEADLINES THAT ARE NEW SINCE YOU LAST LOOKED\n" +

@@ -321,6 +321,9 @@ def query_args():
         "device_id": (request.args.get("device") or "").strip(),
         "day": (request.args.get("day") or "").strip(),
         "place": (request.args.get("q") or "").strip(),
+        # 'as-written' pins the dashboard to what Flipee itself wrote;
+        # anything else shows the archivist's rewrite where one exists.
+        "show": "as-written" if request.args.get("show") == "as-written" else "polished",
         "page": page,
     }
 
@@ -616,7 +619,8 @@ def reflect():
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
         )
-        text = "".join(block.text for block in response.content if block.type == "text").strip()
+        text = context.clean_entry_text(
+            "".join(block.text for block in response.content if block.type == "text"))
         if not text:
             return jsonify({"ok": False, "error": "empty response from model"}), 502
         # Real usage, archived per entry. The briefing is bounded by design,
