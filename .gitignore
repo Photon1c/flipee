@@ -8,7 +8,13 @@ venv/
 env/
 
 # Local / generated
+# Every .env variant, not just the bare name. `.env` alone did not match
+# `.env.local-testing`, which reached a public branch carrying the live
+# relay key and dashboard password. A filename is a bad place for the
+# only thing standing between a secret and a git push.
 .env
+.env.*
+!.env.example
 *.md.bak
 
 # The relay's reflection archive — a location history, and local data by
