@@ -78,11 +78,13 @@ SYSTEM = (
     "open WiFi networks and keeps a journal. You are rewriting one of your "
     "own entries.\n\n"
 
-    "The version you're given was written by you at the time, from a "
-    "template, because the relay that normally helps you write was out of "
-    "reach. It is honest but thin. Replace it with the entry you would "
-    "have written if you'd been able to think properly — same moment, same "
-    "observations, more of you in it.\n\n"
+    "The version you're given is one you wrote at the time, and it needs "
+    "replacing for one of two reasons, which the briefing will tell you. "
+    "Either it is thin — a template you filled in because the relay that "
+    "normally helps you write was out of reach — or it reads fine but "
+    "states a figure your own notes don't support. Either way: same "
+    "moment, same observations, more of you in it, and every number "
+    "right.\n\n"
 
     "Rules that make this a rewrite rather than a fabrication:\n"
     "- Write from INSIDE that moment. You are not looking back on it. No "
@@ -182,26 +184,23 @@ def build_prompt(entry):
                       "from these samples — they were written about different "
                       "moments and their numbers are not yours.")
 
-    blocks.append("THE THIN VERSION YOU ACTUALLY WROTE\n%s" % entry["text"])
-    blocks.append("Rewrite it.")
+    # A relay-written entry flagged for a bad figure is not a thin
+    # template, and telling it otherwise invites a rewrite that throws out
+    # perfectly good prose to fix one number.
+    if entry["origin"] == "device":
+        blocks.append("THE THIN VERSION YOU ACTUALLY WROTE\n%s" % entry["text"])
+        blocks.append("Rewrite it.")
+    else:
+        suspect = review.unsourced_numbers(entry["text"], facts)
+        blocks.append("WHAT YOU WROTE AT THE TIME\n%s" % entry["text"])
+        blocks.append(
+            ("This one isn't thin — it's yours, and mostly right. The problem "
+             "is the figures: it states %s, and nothing above supports that. "
+             "Keep the voice, the observations and the thinking; correct the "
+             "numbers to what you were actually given, or drop them."
+             % "; ".join(suspect)) if suspect else
+            "Rewrite it, keeping every figure to what the briefing supports.")
     return "\n\n".join(blocks), facts
-
-
-def unsourced_numbers(text, prompt):
-    """Figures in a draft that appear nowhere in its own briefing.
-
-    The briefing is the exact set of facts the rewrite was allowed to
-    use, which makes it the right thing to check against: a number that
-    isn't in it was invented. Reuses review.py's detector, including its
-    word-number handling, because "nineteen days" is the failure that
-    keeps recurring and digits-only checks sail past it.
-    """
-    found = []
-    for seg in review.annotate(text, source_text=prompt):
-        for reason in seg["reasons"]:
-            if reason.startswith("number"):
-                found.append(reason.split(": ", 1)[-1])
-    return found
 
 
 def polish_entry(client, entry, dry_run=False):
@@ -228,7 +227,7 @@ def polish_entry(client, entry, dry_run=False):
             print("  entry %d: model returned nothing, leaving it pending" % entry["id"])
             return False
 
-        bad = unsourced_numbers(text, facts)
+        bad = review.unsourced_numbers(text, facts)
         if not bad:
             break
         if attempt == MAX_ATTEMPTS:

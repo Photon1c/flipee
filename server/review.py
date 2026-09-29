@@ -209,3 +209,25 @@ def annotate(text, device_id=None, pk=None, source_text=None):
 
 def count_flagged(segments):
     return sum(1 for s in segments if s["reasons"])
+
+
+def unsourced_numbers(text, source_text):
+    """Figures in a piece of writing that appear nowhere in its sources.
+
+    `source_text` must be facts only — the state lines, place background
+    and headlines — and must NOT include previous entries. Validating
+    against a briefing that contains earlier entries lets a fabrication
+    launder itself: one entry invented "nineteen days", that text went
+    into the next briefing as a writing sample, and "nineteen" then
+    counted as sourced ever after.
+
+    Used by both writers: the archivist retries on a hit (nobody is
+    waiting on it), while /reflect just flags the entry for the archivist
+    to repair, because a device is holding a 15s budget open.
+    """
+    found = []
+    for seg in annotate(text, source_text=source_text):
+        for reason in seg["reasons"]:
+            if reason.startswith("number"):
+                found.append(reason.split(": ", 1)[-1])
+    return found

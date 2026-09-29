@@ -65,6 +65,9 @@ SAME_SITTING_MINUTES = 45
 # How many already-read headlines to spell out before summarizing the rest
 # as a count.
 STALE_SHOWN = 3
+# The one block that is prose rather than fact. Named so build() can
+# exclude it from what numbers are checked against.
+RECENT_HEADING = "YOUR LAST ENTRIES, VERBATIM"
 
 
 def _describe_gap(state):
@@ -152,10 +155,20 @@ def _state_lines(state, ssid, local_time, battery_pct, uptime_s, lat, lon):
 
 
 def build(device_id, **kwargs):
-    """The user message for one reflection, plus the state dict (which the
-    caller reuses for the memory update)."""
+    """Returns (user_message, facts, state).
+
+    `facts` is the subset of the briefing a figure may legitimately come
+    from — everything except the verbatim previous entries. The caller
+    checks the finished entry's numbers against it.
+
+    Splitting it out matters: validating against the whole briefing would
+    count anything an earlier entry said as a source, so a fabricated
+    "nineteen days" becomes self-justifying the moment it lands in the
+    archive and gets quoted back as a writing sample.
+    """
     blocks, state = build_blocks(device_id, **kwargs)
-    return "\n\n".join(blocks), state
+    facts = [b for b in blocks if not b.startswith(RECENT_HEADING)]
+    return "\n\n".join(blocks), "\n\n".join(facts), state
 
 
 def build_blocks(device_id, city, region, country, ssid, battery_pct, uptime_s,
@@ -217,7 +230,7 @@ def build_blocks(device_id, city, region, country, ssid, battery_pct, uptime_s,
                 text = text[:RECENT_CHARS].rsplit(" ", 1)[0] + "..."
             parts.append("[%s, from %s]\n%s" % (
                 entry["created_utc"], entry["location"], text))
-        blocks.append("YOUR LAST ENTRIES, VERBATIM\n" + "\n\n".join(parts) +
+        blocks.append(RECENT_HEADING + "\n" + "\n\n".join(parts) +
                       "\n\nThe bracketed lines are labels so you can tell them "
                       "apart — they are not part of an entry and must never "
                       "appear in what you write. Don't echo their openings, "

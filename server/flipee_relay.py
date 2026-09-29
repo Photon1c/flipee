@@ -595,8 +595,9 @@ def reflect():
     # history, this place, its notes, and which headlines are actually new.
     # Without this the model has no way to tell its twelfth entry from its
     # first, and writes the first one every time.
+    facts = ""
     try:
-        user_msg, state = context.build(
+        user_msg, facts, state = context.build(
             device_id=device_id, city=city, region=region, country=country,
             ssid=payload.get("ssid") or "", battery_pct=battery_pct,
             uptime_s=uptime_s, headlines=headlines, local_time=local_time,
@@ -629,6 +630,20 @@ def reflect():
         usage = getattr(response, "usage", None)
         in_tokens = getattr(usage, "input_tokens", None)
         out_tokens = getattr(usage, "output_tokens", None)
+
+        # Flag-and-keep, deliberately not retry-and-fix. A figure the
+        # briefing doesn't support is worth catching — one entry claimed
+        # "nineteen days" against a briefing that said 2.3 — but a device
+        # is waiting on this call with a 15s budget, and spending a second
+        # generation to protect a number would risk the whole entry. So
+        # the entry ships as written and is marked for the archivist,
+        # which does validate and retry, and gets to it within its cycle.
+        suspect_numbers = []
+        if facts:
+            try:
+                suspect_numbers = review.unsourced_numbers(text, facts)
+            except Exception as e:
+                app.logger.warning("number check failed, shipping unflagged: %s", e)
     except Exception as e:
         # The SDK stringifies every transport failure as a bare "Connection
         # error." — true, and useless: blocked egress, a missing CA bundle,
@@ -666,7 +681,12 @@ def reflect():
             lat=lat if isinstance(lat, (int, float)) else None,
             lon=lon if isinstance(lon, (int, float)) else None,
             in_tokens=in_tokens, out_tokens=out_tokens,
+            needs_polish=1 if suspect_numbers else 0,
         )
+        if suspect_numbers:
+            app.logger.warning(
+                "entry %s claims %s, which the briefing doesn't support — "
+                "flagged for the archivist", entry_id, "; ".join(suspect_numbers))
     except Exception as e:
         app.logger.warning("could not archive reflection: %s", e)
 
