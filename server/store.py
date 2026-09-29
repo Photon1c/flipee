@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS reflections (
     model       TEXT    NOT NULL DEFAULT '',
     in_tokens   INTEGER,                        -- what the briefing actually cost
     out_tokens  INTEGER,
+    -- 'relay'  = Claude wrote it here, live, on a flip
+    -- 'device' = Flipee wrote it itself while the relay was unreachable and
+    --            uploaded it later from its queue
+    origin      TEXT    NOT NULL DEFAULT 'relay',
+    -- The device's own id for a reflection, so a queued entry uploaded
+    -- twice lands once. Empty for relay-written entries, which can't be
+    -- retried by definition.
+    entry_uid   TEXT    NOT NULL DEFAULT '',
+    -- Device-written entries are templated filler; the archivist pass will
+    -- rewrite them properly later without touching created_utc.
+    needs_polish INTEGER NOT NULL DEFAULT 0,
     text        TEXT    NOT NULL
 );
 -- What Flipee has worked out and wants to carry forward, distilled after
@@ -101,6 +112,15 @@ CREATE INDEX IF NOT EXISTS idx_reflections_device
     ON reflections(device_id, created_utc DESC);
 CREATE INDEX IF NOT EXISTS idx_reflections_place
     ON reflections(device_id, place_key, created_utc DESC);
+-- Makes re-uploading a queued entry harmless. A device that loses the
+-- response to a successful upload has no way to tell it from a failure,
+-- so it will retry; without this that retry becomes a duplicate entry.
+-- Partial, because relay-written entries have no uid and would otherwise
+-- all collide on ''.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reflections_uid
+    ON reflections(device_id, entry_uid) WHERE entry_uid <> '';
+CREATE INDEX IF NOT EXISTS idx_reflections_polish
+    ON reflections(needs_polish, created_utc) WHERE needs_polish = 1;
 """
 
 # Columns added after the first release. SQLite can't add them idempotently
@@ -114,6 +134,9 @@ _ADDED_COLUMNS = (
     ("lon", "REAL"),
     ("in_tokens", "INTEGER"),
     ("out_tokens", "INTEGER"),
+    ("origin", "TEXT NOT NULL DEFAULT 'relay'"),
+    ("entry_uid", "TEXT NOT NULL DEFAULT ''"),
+    ("needs_polish", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -173,7 +196,8 @@ def utc_now_iso():
 def save(device_id, device_name, city, region, country, ssid,
          battery_pct, uptime_s, headlines, model, text, created_utc=None,
          local_time="", tz_offset_s=None, lat=None, lon=None,
-         in_tokens=None, out_tokens=None):
+         in_tokens=None, out_tokens=None,
+         origin="relay", entry_uid="", needs_polish=0):
     """Store one reflection; returns its row id.
 
     `created_utc` is the relay's own clock rather than anything the device
@@ -184,18 +208,29 @@ def save(device_id, device_name, city, region, country, ssid,
     """
     with connect() as conn:
         cur = conn.execute(
-            """INSERT INTO reflections
+            """INSERT OR IGNORE INTO reflections
                  (device_id, device_name, created_utc, city, region, country,
                   place_key, ssid, battery_pct, uptime_s, local_time,
                   tz_offset_s, lat, lon, headlines, model, in_tokens,
-                  out_tokens, text)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  out_tokens, origin, entry_uid, needs_polish, text)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (device_id, device_name, created_utc or utc_now_iso(), city, region,
              country, place_key(city, region, country), ssid, battery_pct,
              uptime_s, local_time, tz_offset_s, lat, lon,
-             json.dumps(list(headlines or [])), model, in_tokens, out_tokens, text),
+             json.dumps(list(headlines or [])), model, in_tokens, out_tokens,
+             origin, entry_uid, 1 if needs_polish else 0, text),
         )
-        return cur.lastrowid
+        if cur.rowcount:
+            return cur.lastrowid
+        # OR IGNORE swallowed it: this uid is already archived, which means
+        # the device is retrying an upload whose response it never saw.
+        # Hand back the existing id so the retry reads as the success it
+        # actually is and the device can drop it from its queue.
+        existing = conn.execute(
+            "SELECT id FROM reflections WHERE device_id = ? AND entry_uid = ?",
+            (device_id, entry_uid),
+        ).fetchone()
+        return existing["id"] if existing else None
 
 
 def _row_to_entry(row):

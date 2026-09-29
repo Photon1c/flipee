@@ -63,6 +63,9 @@
       {% if e.ssid %}<span class="dim">via {{ e.ssid }}</span>{% endif %}
       {% if e.battery_pct is not none %}<span class="dim">{{ e.battery_pct }}%</span>{% endif %}
       {% if e.in_tokens %}<span class="dim" title="briefing in / entry out">{{ e.in_tokens }}&rarr;{{ e.out_tokens }} tok</span>{% endif %}
+      {%- if e.origin == 'device' %}
+        <span class="offline" title="Written by Flipee itself while the relay was unreachable, then uploaded from its queue. The timestamp is when it was written, not when it arrived.">wrote it itself{% if e.needs_polish %} · unpolished{% endif %}</span>
+      {%- endif %}
       <span class="dim device">{{ e.device_name or e.device_id }}</span>
     </div>
     <div class="text">{{ e.text }}</div>
@@ -97,6 +100,11 @@
   .entry .when { color: var(--fg); }
   .entry .where { color: var(--text); }
   .entry .device { margin-left: auto; }
+  /* Not an error state — an entry that survived being out of range is the
+     system working. Marked so it reads as a draft, not as the same thing
+     as a relay-written one. */
+  .entry .offline { color: var(--dim); border: 1px solid var(--line);
+                    border-radius: 3px; padding: 0 6px; cursor: help; }
   /* pre-wrap, not markdown: the relay asks Claude for plain prose and the
      device adds its own structure around it, so there's nothing to render
      — but paragraph breaks still matter. */

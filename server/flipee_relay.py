@@ -454,16 +454,117 @@ def entries_json():
 
 
 # ---------------------------------------------------------------------
-# The device's endpoint
+# The device's endpoints
 # ---------------------------------------------------------------------
-@app.route("/reflect", methods=["POST"])
-def reflect():
+def device_auth_error():
+    """Shared gate for the two endpoints Flipee itself calls."""
     if not RELAY_KEY:
         # Fail closed: refuse to serve an unauthenticated endpoint rather than
         # silently running open once this is reachable from the internet.
         return jsonify({"ok": False, "error": "FLIPEE_RELAY_KEY is not configured on this server"}), 503
     if not hmac.compare_digest(request.headers.get("X-Flipee-Key", ""), RELAY_KEY):
         return jsonify({"ok": False, "error": "missing or invalid X-Flipee-Key"}), 401
+    return None
+
+
+def device_fields(payload):
+    """The observations every device payload carries, normalized."""
+    fields = {
+        "city": (payload.get("city") or "").strip(),
+        "region": (payload.get("region") or "").strip(),
+        "country": (payload.get("country") or "").strip(),
+        "ssid": payload.get("ssid") or "",
+        "headlines": payload.get("headlines") or [],
+        # Sketches built before the archive existed don't send these, and a
+        # device that can't identify itself still deserves to have its
+        # entries kept — they just land under one shared placeholder id.
+        "device_id": (str(payload.get("device_id") or "").strip() or "unidentified-flipee")[:64],
+        "device_name": str(payload.get("device_name") or "").strip()[:64],
+        # Anchors from a sketch new enough to send them; older ones just get
+        # a thinner briefing.
+        "local_time": str(payload.get("local_time") or "").strip()[:64],
+    }
+    battery = payload.get("battery_pct", -1)
+    fields["battery_pct"] = battery if isinstance(battery, int) and battery >= 0 else None
+    uptime = payload.get("uptime_s", 0)
+    fields["uptime_s"] = int(uptime) if isinstance(uptime, int) else None
+    tz = payload.get("tz_offset_s")
+    fields["tz_offset_s"] = tz if isinstance(tz, int) else None
+    for axis in ("lat", "lon"):
+        value = payload.get(axis)
+        fields[axis] = value if isinstance(value, (int, float)) else None
+    return fields
+
+
+@app.route("/archive", methods=["POST"])
+def archive():
+    """Store a reflection Flipee already wrote, with its original timestamp.
+
+    This is the other half of the device's queue. When the relay can't be
+    reached — a foraged network with no route, a relay that's down — Flipee
+    writes its own templated reflection, keeps it on the SD card, and
+    uploads it here whenever a network comes back. Nothing is generated:
+    the text arrives finished.
+
+    `created_utc` is whatever the device recorded at the time, not now.
+    An entry written on Tuesday and uploaded on Thursday belongs on
+    Tuesday, or the archive quietly becomes a log of connectivity instead
+    of a diary.
+    """
+    blocked = device_auth_error()
+    if blocked is not None:
+        return blocked
+
+    payload = request.get_json(silent=True) or {}
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "no text to archive"}), 400
+
+    fields = device_fields(payload)
+    # The device's own id for this reflection. Without it a retry after a
+    # lost response silently duplicates the entry.
+    entry_uid = str(payload.get("entry_uid") or "").strip()[:64]
+    created_utc = str(payload.get("created_utc") or "").strip()[:32]
+    stamped_by_device = bool(created_utc)
+    if not stamped_by_device:
+        # Flipee only has a clock once it has joined a network and reached
+        # NTP, so an offline entry can genuinely have no time of its own.
+        # Arrival time is a worse answer than the truth, but it's the only
+        # one available, and the origin field records which this is.
+        created_utc = store.utc_now_iso()
+
+    try:
+        entry_id = store.save(
+            device_id=fields["device_id"], device_name=fields["device_name"],
+            city=fields["city"], region=fields["region"], country=fields["country"],
+            ssid=fields["ssid"], battery_pct=fields["battery_pct"],
+            uptime_s=fields["uptime_s"], headlines=fields["headlines"],
+            model="", text=text, created_utc=created_utc,
+            local_time=fields["local_time"], tz_offset_s=fields["tz_offset_s"],
+            lat=fields["lat"], lon=fields["lon"],
+            origin="device", entry_uid=entry_uid,
+            # Templated text is filler by design. Marked for the archivist
+            # to rewrite properly later, against the memory it now has.
+            needs_polish=1,
+        )
+    except Exception as e:
+        app.logger.warning("could not archive a queued entry: %s", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Deliberately no memory distillation here. These entries are the
+    # device's own templates — folding them into the notes would teach
+    # Flipee its own filler, and the archivist pass can distil the real
+    # version once it has written one.
+    app.logger.info("archived queued entry %s (uid %s, stamped_by_device=%s)",
+                    entry_id, entry_uid or "-", stamped_by_device)
+    return jsonify({"ok": True, "id": entry_id, "stamped_by_device": stamped_by_device})
+
+
+@app.route("/reflect", methods=["POST"])
+def reflect():
+    blocked = device_auth_error()
+    if blocked is not None:
+        return blocked
 
     payload = request.get_json(silent=True) or {}
     city = (payload.get("city") or "").strip()
