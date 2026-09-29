@@ -1,0 +1,28 @@
+# Schedule for the Flipee archivist.
+#
+#   sudo systemctl enable --now flipee-archivist.timer
+#
+# Fifteen minutes is a deliberate compromise. Entries only need polishing
+# after Flipee has been somewhere the relay couldn't be reached, so most
+# passes will find nothing and cost nothing — a query against an indexed
+# column and an exit. Making it tighter buys latency nobody is waiting
+# for; making it much looser means an entry can sit unpolished for an
+# afternoon.
+
+[Unit]
+Description=Run the Flipee archivist periodically
+Documentation=https://github.com/Photon1c/flipee
+
+[Timer]
+# Give the relay and the network a moment after a reboot rather than
+# racing them.
+OnBootSec=5min
+OnUnitActiveSec=15min
+# If the box was off when a run was due, do it on the next boot instead
+# of silently skipping. A queued entry that waited three days to upload
+# shouldn't wait another three to be rewritten.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
