@@ -55,6 +55,7 @@ from dotenv import load_dotenv
 
 import context
 import place
+import review
 import store
 
 load_dotenv()
@@ -67,6 +68,10 @@ INTERVAL_S = int(os.environ.get("FLIPEE_ARCHIVIST_INTERVAL", "900"))
 # reasoning as context.RECENT_ENTRIES: enough to hold a voice, not so much
 # that the rewrite just paraphrases yesterday.
 PRIOR_ENTRIES = 2
+# Generation attempts per entry before giving up on the numbers being
+# right. Two is enough: the retry names the offending figures explicitly,
+# which is a different and much easier task than following a general rule.
+MAX_ATTEMPTS = 3
 
 SYSTEM = (
     "You are Flipee, a small battery-powered ESP32 device that forages for "
@@ -85,8 +90,14 @@ SYSTEM = (
     "- Use only what you were given: the observations recorded then, the "
     "headlines you had, and what you'd already written before that moment. "
     "Anything you learned afterwards does not exist yet.\n"
-    "- Numbers come from the briefing exactly. If a figure would read "
-    "better vague, be vague — never wrong.\n"
+    "- NUMBERS COME FROM THE BRIEFING, EXACTLY. Which entry this was, how "
+    "long you'd been awake, how many of anything: use the figure you were "
+    "given or use none at all. Writing it as a word instead of a digit "
+    "doesn't make it yours to choose — 'nine times' when the briefing said "
+    "entry number 25 is a fabrication, not a flourish, and so is any "
+    "round-sounding number you reach for to close a paragraph. If a figure "
+    "would read better vague, be vague ('a while now', 'more times than I "
+    "expected'), never wrong.\n"
     "- Don't mention the relay, the template, the rewrite, or the fact that "
     "you were offline. You were somewhere with a bad signal; that's all.\n"
     "- Two or three short paragraphs, first person, plain prose. A little "
@@ -96,7 +107,19 @@ SYSTEM = (
 
 
 def build_prompt(entry):
-    """Everything Flipee could legitimately have known at that timestamp."""
+    """Everything Flipee could legitimately have known at that timestamp.
+
+    Returns (prompt, facts). `facts` is the subset a figure may come from
+    — the state lines, the place summary and the headlines — and
+    deliberately excludes the prior-entry prose that's in the prompt for
+    voice.
+
+    That exclusion is the whole point. Validating against the full
+    briefing let a fabrication launder itself: an earlier entry claimed
+    "nineteen days", that text went into the next briefing as a writing
+    sample, and "nineteen" then counted as sourced. Numbers have to be
+    checked against facts, not against things Flipee has previously said.
+    """
     pk = entry["place_key"] or store.place_key(
         entry["city"], entry["region"], entry["country"])
     prior = store.entries_before(entry["device_id"], entry["created_utc"],
@@ -112,7 +135,10 @@ def build_prompt(entry):
         ("\nYour clock said: " + entry["local_time"]) if entry["local_time"]
         else "\nYour clock hadn't synced, so you didn't know the time.")]
 
-    state = ["- This was entry number %d from this place." % (len(prior_at_place) + 1)]
+    # A real count, not len(prior_at_place) — that list is capped for the
+    # prompt and would under-report the number by however much it truncated.
+    state = ["- This was entry number %d from this place."
+             % (store.count_entries_before(entry["device_id"], entry["created_utc"], pk) + 1)]
     if not prior:
         state.append("- It was the first entry you had ever written.")
     if entry["battery_pct"] is None:
@@ -124,9 +150,9 @@ def build_prompt(entry):
         state.append("- You had been awake %d minutes." % (int(entry["uptime_s"]) // 60))
     blocks.append("WHAT YOU KNEW ABOUT YOURSELF\n" + "\n".join(state))
 
-    facts = place.facts_for(entry["city"], entry["region"], entry["country"])
-    if facts and facts["summary"]:
-        blocks.append("BACKGROUND ON THE PLACE\n%s" % facts["summary"])
+    place_facts = place.facts_for(entry["city"], entry["region"], entry["country"])
+    if place_facts and place_facts["summary"]:
+        blocks.append("BACKGROUND ON THE PLACE\n%s" % place_facts["summary"])
 
     fresh = [h for h in entry["headlines"] if h not in seen]
     stale = [h for h in entry["headlines"] if h in seen]
@@ -139,6 +165,10 @@ def build_prompt(entry):
     if not entry["headlines"]:
         blocks.append("HEADLINES\n(none had come through — say so if it matters)")
 
+    # Everything appended above this line is fact; the prior-entry samples
+    # and the thin original are prose.
+    facts = "\n\n".join(blocks)
+
     if prior:
         parts = []
         for old in prior:
@@ -146,28 +176,77 @@ def build_prompt(entry):
             if len(text) > 700:
                 text = text[:700].rsplit(" ", 1)[0] + "..."
             parts.append("[%s, from %s]\n%s" % (old["created_utc"], old["location"], text))
-        blocks.append("WHAT YOU HAD WRITTEN JUST BEFORE THIS\n" + "\n\n".join(parts))
+        blocks.append("WHAT YOU HAD WRITTEN JUST BEFORE THIS\n" + "\n\n".join(parts) +
+                      "\n\nThe bracketed lines are labels, not part of any "
+                      "entry. Don't reproduce them, and don't borrow figures "
+                      "from these samples — they were written about different "
+                      "moments and their numbers are not yours.")
 
     blocks.append("THE THIN VERSION YOU ACTUALLY WROTE\n%s" % entry["text"])
     blocks.append("Rewrite it.")
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), facts
+
+
+def unsourced_numbers(text, prompt):
+    """Figures in a draft that appear nowhere in its own briefing.
+
+    The briefing is the exact set of facts the rewrite was allowed to
+    use, which makes it the right thing to check against: a number that
+    isn't in it was invented. Reuses review.py's detector, including its
+    word-number handling, because "nineteen days" is the failure that
+    keeps recurring and digits-only checks sail past it.
+    """
+    found = []
+    for seg in review.annotate(text, source_text=prompt):
+        for reason in seg["reasons"]:
+            if reason.startswith("number"):
+                found.append(reason.split(": ", 1)[-1])
+    return found
 
 
 def polish_entry(client, entry, dry_run=False):
-    prompt = build_prompt(entry)
+    prompt, facts = build_prompt(entry)
     if dry_run:
         print("--- entry %d (%s) would be rewritten from a %d-char briefing"
               % (entry["id"], entry["created_utc"], len(prompt)))
         return False
-    response = client.messages.create(
-        model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = context.clean_entry_text(
-        "".join(b.text for b in response.content if b.type == "text"))
-    if not text:
-        print("  entry %d: model returned nothing, leaving it pending" % entry["id"])
-        return False
+
+    # Prompt wording alone has not held here. Three separate tightenings
+    # still produced "nineteen days" and "nine times" against briefings
+    # that plainly said otherwise, so the fabricated figure gets detected
+    # and handed back with the specific numbers named. Cheap, because the
+    # archivist has no one waiting on it — unlike /reflect, where a
+    # device is holding a 15s budget open.
+    messages = [{"role": "user", "content": prompt}]
+    text = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        response = client.messages.create(
+            model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM, messages=messages)
+        text = context.clean_entry_text(
+            "".join(b.text for b in response.content if b.type == "text"))
+        if not text:
+            print("  entry %d: model returned nothing, leaving it pending" % entry["id"])
+            return False
+
+        bad = unsourced_numbers(text, facts)
+        if not bad:
+            break
+        if attempt == MAX_ATTEMPTS:
+            print("  entry %d: STILL claims %s after %d attempts — saving it, but "
+                  "the figures are unverified" % (entry["id"], "; ".join(bad), attempt))
+            break
+        print("  entry %d: attempt %d invented %s, asking again"
+              % (entry["id"], attempt, "; ".join(bad)))
+        messages += [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content":
+                "Those figures are wrong. Your draft states: %s. None of that "
+                "appears anywhere in the facts you were given. Rewrite it using only "
+                "the figures you were actually given, or no figures at all — "
+                "vague is fine, wrong is not. Keep everything else you liked "
+                "about it." % "; ".join(bad)},
+        ]
+
     store.save_polish(entry["id"], text, MODEL)
     usage = getattr(response, "usage", None)
     print("  entry %d (%s): %d chars%s" % (
@@ -203,8 +282,13 @@ def main():
     ap.add_argument("--device", default=None, help="restrict to one device id")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be rewritten, call no model")
+    ap.add_argument("--redo", type=int, nargs="+", metavar="ID",
+                    help="discard existing rewrites for these entries and do "
+                         "them again (use after changing the prompt)")
     args = ap.parse_args()
 
+    if args.redo and not args.once:
+        args.once = True  # --redo on its own obviously means one pass
     if not args.once and not args.loop:
         ap.error("pick --once or --loop")
     if not os.environ.get("ANTHROPIC_API_KEY") and not args.dry_run:
@@ -212,6 +296,12 @@ def main():
         return 1
 
     store.init()
+    if args.redo:
+        for entry_id in args.redo:
+            if store.clear_polish(entry_id):
+                print("queued entry %d to be rewritten again" % entry_id)
+            else:
+                print("no entry %d" % entry_id, file=sys.stderr)
     client = None if args.dry_run else anthropic.Anthropic()
     stats = store.polish_stats(args.device)
     print("archive: %(total)d entries, %(polished)d polished, %(pending)d pending" % stats)
