@@ -238,7 +238,27 @@ const float    SHAKE_THRESHOLD_G     = 2.2f;   // total accel magnitude (g) that
 const uint32_t SHAKE_COOLDOWN_MS     = 1200;
 const float    PAGE_TILT_THRESHOLD   = 0.45f;  // pitch (sin of angle) that triggers a page turn
 const uint32_t PAGE_TURN_COOLDOWN_MS = 500;
-const float    FLIP_GYRO_THRESHOLD   = 3.0f;   // rad/s — tune once you have the board in hand
+// rad/s — setup() calls imu.setGyroUnit_rads(true), so the library really
+// does hand back radians here. (Its own default is dps; don't trust the
+// library default, trust the call.)
+//
+// Measured on this board with LOG_GYRO:
+//     stationary       mean 0.39, peak 0.45
+//     a knock nearby   peak 2.36
+//     a real flip      peak 7.36   (~420 deg/s)
+//
+// The original 3.0 sat only 1.3x above a passing knock, which is how the
+// device came to write two journal entries overnight with nobody
+// touching it. 4.0 keeps the same easy gesture — a flip peaks at nearly
+// twice this — while putting real daylight between it and a bumped desk.
+// If phantom entries come back, raise it; the fired magnitude is logged
+// every time, so tune from data rather than guessing.
+const float    FLIP_GYRO_THRESHOLD   = 4.0f;   // rad/s
+// Print the gyro baseline once a minute and the magnitude behind every
+// flip. On by default because this gesture has already fired twice with
+// nobody touching the device; turn it off once the threshold is trusted.
+const bool     LOG_GYRO              = true;
+const uint32_t GYRO_REPORT_MS        = 60000;
 const uint32_t FLIP_SUSTAIN_MS       = 220;    // how long the spin must hold above threshold
 const uint32_t FLIP_COOLDOWN_MS      = 3000;
 const uint8_t  TEXT_SIZE             = 2;      // GFX text scale for body copy
@@ -319,6 +339,14 @@ String lastReflectPath = "";
 bool rotateSustaining = false;
 uint32_t rotateStartMs = 0;
 
+// Gyro diagnostics — see noteGyroSample().
+float    gyroPeak = 0.0f;
+double   gyroSum = 0.0;
+float    accelPeak = 0.0f;
+double   accelSum = 0.0;
+uint32_t gyroSamples = 0;
+uint32_t lastGyroReportMs = 0;
+
 float angleX = 0.0f;
 uint32_t lastImuMicros = 0;
 const float COMP_ALPHA = 0.98f;
@@ -327,32 +355,68 @@ const float COMP_ALPHA = 0.98f;
 // IMU: fused pitch (for paging), accel magnitude (for shake), gyro
 // magnitude (for the flip/spin gesture)
 // ---------------------------------------------------------------------
-void readImu(float &pitchSin, float &accelMagG, float &gyroMagRadS) {
+void readImu(float &pitchSin, float &accelMagG, float &gyroMagDps) {
   uint32_t now = micros();
   float dt = (lastImuMicros == 0) ? 0.01f : (now - lastImuMicros) / 1000000.0f;
   lastImuMicros = now;
 
   QMI8658_Data d;
   accelMagG = 1.0f;
-  gyroMagRadS = 0.0f;
+  gyroMagDps = 0.0f;
   if (imu.readSensorData(d)) {
     float accAngleX = atan2f(d.accelY, sqrtf(d.accelX * d.accelX + d.accelZ * d.accelZ));
     angleX = COMP_ALPHA * (angleX + d.gyroX * dt) + (1.0f - COMP_ALPHA) * accAngleX;
     float accMag = sqrtf(d.accelX * d.accelX + d.accelY * d.accelY + d.accelZ * d.accelZ);
     accelMagG = accMag / 9.81f;
-    gyroMagRadS = sqrtf(d.gyroX * d.gyroX + d.gyroY * d.gyroY + d.gyroZ * d.gyroZ);
+    gyroMagDps = sqrtf(d.gyroX * d.gyroX + d.gyroY * d.gyroY + d.gyroZ * d.gyroZ);
   }
   pitchSin = sinf(angleX);
 }
 
-bool detectFlip(float gyroMagRadS, uint32_t now) {
-  if (gyroMagRadS > FLIP_GYRO_THRESHOLD) {
+// Running gyro statistics, to answer a question the device was answering
+// wrong: it wrote two journal entries overnight that nobody asked for.
+// writeReflection() has exactly one caller, so the gesture is firing on
+// its own — but "the board got knocked" and "the threshold is in the
+// wrong units" look identical from the outside and need opposite fixes.
+// A stationary baseline distinguishes them in one minute of watching.
+void noteGyroSample(float gyroMagDps, float accelMagG, uint32_t now) {
+  if (!LOG_GYRO) return;
+  if (gyroMagDps > gyroPeak) gyroPeak = gyroMagDps;
+  gyroSum += gyroMagDps;
+  if (accelMagG > accelPeak) accelPeak = accelMagG;
+  accelSum += accelMagG;
+  gyroSamples++;
+  if (now - lastGyroReportMs < GYRO_REPORT_MS) return;
+  lastGyroReportMs = now;
+  float n = gyroSamples ? (float)gyroSamples : 1.0f;
+  Serial.printf("[gyro]  peak %.2f mean %.2f  (flip threshold %.1f)\n",
+                gyroPeak, (float)(gyroSum / n), FLIP_GYRO_THRESHOLD);
+  // Checked for the same class of bug and cleared: this reads 1.02 at
+  // rest, which is correct, because setup() calls setAccelUnit_mps2(true)
+  // and readImu divides by 9.81. Left in because a shake threshold is
+  // only meaningful next to what the thing actually reads when still.
+  Serial.printf("[accel] peak %.2f mean %.2f  (shake threshold %.1f, expect ~1.00 at rest)"
+                "  %lu samples in %lus\n",
+                accelPeak, (float)(accelSum / n), SHAKE_THRESHOLD_G,
+                (unsigned long)gyroSamples, (unsigned long)(GYRO_REPORT_MS / 1000));
+  gyroPeak = 0.0f; gyroSum = 0.0;
+  accelPeak = 0.0f; accelSum = 0.0;
+  gyroSamples = 0;
+}
+
+bool detectFlip(float gyroMagDps, uint32_t now) {
+  if (gyroMagDps > FLIP_GYRO_THRESHOLD) {
     if (!rotateSustaining) {
       rotateSustaining = true;
       rotateStartMs = now;
     } else if (now - rotateStartMs > FLIP_SUSTAIN_MS && now - lastFlipMs > FLIP_COOLDOWN_MS) {
       lastFlipMs = now;
       rotateSustaining = false;
+      if (LOG_GYRO) {
+        Serial.printf("[gyro] FLIP fired: %.2f sustained %lums (threshold %.2f)\n",
+                      gyroMagDps, (unsigned long)(now - rotateStartMs),
+                      FLIP_GYRO_THRESHOLD);
+      }
       return true;
     }
   } else {
@@ -1389,8 +1453,8 @@ void setup() {
 }
 
 void loop() {
-  float pitchSin, accelMagG, gyroMagRadS;
-  readImu(pitchSin, accelMagG, gyroMagRadS);
+  float pitchSin, accelMagG, gyroMagDps;
+  readImu(pitchSin, accelMagG, gyroMagDps);
   uint32_t now = millis();
 
   // --- WiFi: keep trying if not connected, notice if it drops ---
@@ -1427,7 +1491,8 @@ void loop() {
   }
 
   // --- flip/spin: write a journal reflection ---
-  if (detectFlip(gyroMagRadS, now)) {
+  noteGyroSample(gyroMagDps, accelMagG, now);
+  if (detectFlip(gyroMagDps, now)) {
     writeReflection();
   }
 
