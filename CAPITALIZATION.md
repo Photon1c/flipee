@@ -72,7 +72,7 @@ silent.
 | Waveshare ESP32-S3-AMOLED-1.91 (rev V2) | Brain, display, IMU, WiFi | Purchase | $35–45 | Operational |
 | microSD card | Offline journal + queue | Purchase | $6–10 | Operational |
 | USB-C cable / power | Bench power + flashing | On hand | $5–8 | Operational |
-| LiPo battery module | Untethered operation | Ordered | $8–15 | **Awaiting delivery** |
+| LiPo battery module | Untethered operation | Purchase, soldered in | $8–15 | **Operational** |
 | Misc. integration | — | Allowance | $3–10 | Partial |
 | **Current BOM Range** | | | **$55–80** | |
 
@@ -87,22 +87,34 @@ silent.
 | Hardware BOM | — | $55–80 | Above |
 | **Total cash to reach v0.3** | | **~$390–400** | |
 
-> **Note on the $355 — treat it as two different things.**
+> **Note on the $355 — the waste was in session management, not model tier.**
 >
-> It is a real, non-recoverable cash cost and belongs in the ledger. But it
-> should not be read as $355 of value creation. The spend arose from a
-> frontier-tier model answering a long-running session across four days, under
-> the assumption that a cheaper tier was in use. A material share — plausibly
-> half — is **tooling inefficiency, not engineering value**.
+> A first pass at this called the spend largely inefficiency. On review that
+> is too harsh and the decomposition matters, because it changes what to do
+> differently rather than just what to regret.
 >
-> The honest accounting is: the work product below is genuinely worth its
-> replacement value; the $355 is what it cost *this time*, and a repeat of the
-> same work under the corrected model policy would cost a fraction of it.
-> Capitalizing avoidable overspend as asset value is how ledgers start lying.
+> **The model tier earned its keep.** §C lists ~120–210 hours of studio-
+> equivalent work delivered in four days, across firmware, backend, deploy and
+> security, with few wrong turns and fast recovery from the ones that happened.
+> Several findings in §D.1 — the gyro units, the capped-count bug, the
+> self-laundering validation loop — required holding firmware, server and
+> archive in mind simultaneously and were caught by reasoning rather than by
+> testing. Hours not spent are the largest cost in any build, and a high
+> reasoning tier reduced them sharply.
 >
-> **Control now in place:** all three model call sites pinned to Haiku 4.5,
-> session model switched, billing alerts to be configured. See
-> `server/flipee_relay.py` config block.
+> **The waste was elsewhere:** a single four-day session, whose whole context
+> was resent on every turn, with no compaction. That is a usage-pattern cost,
+> largely independent of what was being built. The same work in scoped sessions
+> at the same tier would have cost materially less and produced the same
+> artifacts.
+>
+> So it is booked as **cash development cost, not capitalized asset value** —
+> the work product is worth its replacement value regardless of what the
+> tooling cost this time — while recognising that a cheaper tier would likely
+> have produced fewer hours of output, not merely cheaper ones.
+>
+> **Controls now in place:** all three model call sites pinned to Haiku 4.5,
+> session model switched, compaction used, billing alerts to be configured.
 
 ### B.3 Operating Cost — the number that matters going forward
 
@@ -218,16 +230,29 @@ original mistake:
 | **M6 — Self-Repair** | Archivist rewrites offline entries unattended | **Major inflection** | ✅ Sep 28 |
 | **M7 — Public Deployment** | Reachable from any foraged network, TLS | **Enables the premise** | ✅ Sep 29 |
 | **M8 — Verified Fact-Binding** | Claims bound to facts on both writers | Achieved | ✅ Sep 29 |
-| **M9 — Untethered Operation** | Runs on battery, gauge live | Pending module | ⏳ Next |
-| **M10 — True Foraging** | Writes from a network it has never seen | **Premise validated** | ⏳ Next |
+| **M9 — Untethered Operation** | Runs on a soldered LiPo, USB for recharge | Achieved | ✅ Sep 29 |
+| **M9b — Battery Telemetry** | Device can report its own charge | Sub-item, open | ⏳ Next |
+| **M10 — True Foraging** | Writes from a network it has never seen | **Premise validated** | ⏳ Sep 30 |
 | **M11 — Multi-Place Memory** | Continuity across genuinely different places | **Major IP validation** | ⏳ Next |
 | **M12 — Reproducible Build** | Second unit from documentation alone | **Major IP validation** | ⏳ Future |
 
-**Current position:** M8 achieved. **M9 and M10 are the next valuation events**,
-and both are close — M9 needs only the battery module; M10 needs only taking the
-device somewhere else. Every entry to date is from one desk in Federal Way, so
-the foraging premise is *architecturally* complete but **not yet empirically
-demonstrated**.
+**Current position:** M9 achieved — Flipee has been running off a soldered LiPo
+with USB for recharge, so it is physically untethered and no longer depends on
+a wall.
+
+**M9b is a real gap, not pedantry.** Power and sensing were built as one
+milestone but are separate in the firmware: `HAS_BATTERY_ADC` is still `false`,
+so `battery_pct` is `-1` on all 37 entries, the gauge on the right edge shows a
+dim dash rather than a level, and the briefing still tells the model *"This
+build has NO battery sensor... don't claim a level."* The device is running on
+a battery it cannot perceive. Closing this needs the ADC pin and divider ratio
+for how the cell is actually wired.
+
+**M10 is the next valuation event and is imminent** — the device leaves the desk
+Sep 30. Every entry to date but a few synthetic test payloads is from one
+network in Federal Way, so the foraging premise remains *architecturally*
+complete and **empirically undemonstrated** until an entry exists from a network
+Flipee has never seen.
 
 ---
 
@@ -292,6 +317,8 @@ Until that entry exists, the premise is designed, deployed, and *unproven*.
 
 **Confidence: Medium** (Medium-High on engineering, Medium on IP)
 
+M9 achieved Sep 29: untethered on a soldered LiPo, USB for recharge.
+
 Supporting the estimate:
 - 26 commits over 4 days; 4,940 lines of source; ~6,600 lines added all time
 - 5 test harnesses, ~100 assertions, all passing
@@ -302,5 +329,5 @@ Supporting the estimate:
 Limiting the estimate:
 - **Single place.** 36 of 37 entries from one location; foraging unproven
 - **Single device.** No second unit built; reproducibility untested
-- **Tethered.** Battery module not yet installed
+- **Battery unsensed.** Running on LiPo, but `HAS_BATTERY_ADC` is false — the device cannot report its own charge (M9b)
 - **No external users.** All evaluation internal
