@@ -238,17 +238,40 @@ const bool CLOCK_24H = false;
 // --- Behavior / feel ---
 const uint32_t NEWS_REFRESH_MS       = 30UL * 60UL * 1000UL; // re-fetch headlines every 30 min
 const uint32_t IDLE_SLEEP_MS         = 3UL * 60UL * 1000UL;  // dim to a quiet clock after 3 min untouched
-const uint32_t MESSAGE_TIMEOUT_MS    = 60000;  // auto-return to idle after this long unread
+// How long the news view stays up before dropping back to the idle
+// clock. Raised from 60s alongside the slower rotation below: at 25s a
+// screenful, a 60s ceiling only ever showed two of them, so the tail of
+// a feed was unreachable without tilting. Used by the news view only.
+const uint32_t MESSAGE_TIMEOUT_MS    = 150000;
 const float    SHAKE_THRESHOLD_G     = 2.2f;   // total accel magnitude (g) that counts as a shake
 const uint32_t SHAKE_COOLDOWN_MS     = 1200;
 const float    PAGE_TILT_THRESHOLD   = 0.45f;  // pitch (sin of angle) that triggers a page turn
+// Tilt must fall back below this before it can turn another page. Without
+// a release threshold, holding the device at a readable angle counts as a
+// fresh page turn on every loop pass. Comfortably below THRESHOLD so a
+// hand that wobbles slightly doesn't re-arm and double-advance.
+const float    PAGE_TILT_RELEASE     = 0.20f;
 const uint32_t PAGE_TURN_COOLDOWN_MS = 500;
 // The news view cycles on its own so the whole feed gets read without
 // being held and tilted, and so the screen is never parked on a
 // half-empty last page. Tilt still steers and resets this clock, so a
 // deliberate page turn isn't overwritten a moment later. 0 disables
 // auto-rotation and leaves it tilt-only (still wrapping).
-const uint32_t NEWS_AUTO_ROTATE_MS   = 7000;
+//
+// Coupled to MESSAGE_TIMEOUT_MS above: auto-rotation deliberately doesn't
+// count as interaction, so the view drops to the idle clock on that timer
+// no matter what. Eight headlines wrap to ~30 lines at 9 a screen, and
+// because 9 and 30 share a factor the ring visits 10 distinct screens
+// before repeating. At 15s that full cycle is 150s and fits the timeout
+// exactly; at 25s it needs 250s, so four of the ten screens could never
+// be seen in one sitting.
+//
+// Worth knowing how this got mistuned: it was raised 7s -> 14s -> 25s in
+// response to "too fast", but the display was actually being paged twice
+// a second by a tilt bug, and this timer was never involved. Tuning a
+// constant against a symptom it doesn't cause moves it a long way from
+// where it belongs.
+const uint32_t NEWS_AUTO_ROTATE_MS   = 15000;
 // rad/s — setup() calls imu.setGyroUnit_rads(true), so the library really
 // does hand back radians here. (Its own default is dps; don't trust the
 // library default, trust the call.)
@@ -274,6 +297,13 @@ const uint32_t FLIP_SUSTAIN_MS       = 220;    // how long the spin must hold ab
 const uint32_t FLIP_COOLDOWN_MS      = 3000;
 const uint8_t  TEXT_SIZE             = 2;      // GFX text scale for body copy
 const uint8_t  MARGIN                = 12;     // px margin around text regions
+// A thin vertical fuel gauge down the right edge of the news view, plus
+// the width reserved for it so headlines don't wrap underneath. Reads as
+// an empty outline with a dim dash until HAS_BATTERY_ADC is configured —
+// no sensor is a different thing from a flat battery and shouldn't look
+// like one.
+const uint8_t  BATTERY_BAR_W         = 8;
+const uint8_t  BATTERY_BAR_RESERVE   = 20;     // bar + breathing room
 const int      MAX_HEADLINES         = 8;
 
 // --- Theme — amber flip-dot look (from flipdot-sim), or pick an AgentWatch one ---
@@ -342,6 +372,9 @@ std::vector<String> newsLines;
 int newsLinesPerPage = 1;
 int newsOffset = 0;
 uint32_t lastNewsRotateMs = 0;
+// False while a tilt is still being held, so one gesture turns one page.
+bool tiltArmed = true;
+uint32_t lastNewsDebugMs = 0;
 int pageCount = 0;   // kept for the "n/m" in the header
 int currentPage = 0;
 
@@ -1123,7 +1156,9 @@ void scanAndConnect() {
 void layoutHeadlines() {
   const int charW = 6 * TEXT_SIZE;
   const int lineH  = 10 * TEXT_SIZE;
-  const int usableW = LCD_WIDTH - 2 * MARGIN;
+  // Text stops short of the battery gauge on the right edge, or long
+  // headlines would wrap underneath it.
+  const int usableW = LCD_WIDTH - 2 * MARGIN - BATTERY_BAR_RESERVE;
   const int headerH = 10 * TEXT_SIZE + MARGIN;
   const int usableH = LCD_HEIGHT - headerH - MARGIN;
   const int charsPerLine = max(1, usableW / charW);
@@ -1363,6 +1398,34 @@ void rotateNews(int direction) {
   lastNewsRotateMs = millis();
 }
 
+// A vertical fuel gauge down the right edge: outline always, fill
+// proportional to charge. Drawn bottom-up so it empties downward, which
+// is how anyone expects a tank to read.
+void drawBatteryBar() {
+  const int x = LCD_WIDTH - MARGIN - BATTERY_BAR_W;
+  const int top = MARGIN + 10 * TEXT_SIZE + MARGIN;
+  const int bottom = LCD_HEIGHT - MARGIN - 10;
+  const int h = bottom - top;
+  if (h < 8) return;
+
+  gfx->drawRect(x, top, BATTERY_BAR_W, h, theme.dim);
+  // The nub on top, so it reads as a battery rather than a progress bar.
+  gfx->fillRect(x + BATTERY_BAR_W / 4, top - 3, BATTERY_BAR_W / 2, 3, theme.dim);
+
+  int pct = batteryPercent();
+  if (pct < 0) {
+    // Unmeasured: one dim dash across the middle. Deliberately not an
+    // empty gauge, which would claim the battery is flat.
+    gfx->drawFastHLine(x + 2, top + h / 2, BATTERY_BAR_W - 4, theme.dim);
+    return;
+  }
+  int fill = (h - 4) * pct / 100;
+  if (fill > 0) {
+    gfx->fillRect(x + 2, bottom - 2 - fill, BATTERY_BAR_W - 4, fill,
+                  pct <= 15 ? theme.dim : theme.accent);
+  }
+}
+
 void drawNewsPage() {
   gfx->fillScreen(theme.bg);
 
@@ -1390,6 +1453,8 @@ void drawNewsPage() {
     gfx->println(newsLines[idx]);
     y += lineH;
   }
+
+  drawBatteryBar();
 
   if (pageCount > 1) {
     gfx->setTextSize(1);
@@ -1547,21 +1612,35 @@ void loop() {
   }
 
   if (currentView == VIEW_NEWS) {
-    if (now - lastPageTurnMs > PAGE_TURN_COOLDOWN_MS) {
-      // No bounds check in either direction now — the ring wraps, so
-      // tilting forward on the last screenful returns to the first
-      // instead of doing nothing, which is what made it feel stuck.
-      if (pitchSin > PAGE_TILT_THRESHOLD) {
-        rotateNews(+1);
-        lastPageTurnMs = now;
-        lastInteractionMs = now;
-        drawNewsPage();
-      } else if (pitchSin < -PAGE_TILT_THRESHOLD) {
-        rotateNews(-1);
+    // One page per tilt GESTURE, not per loop pass while tilted. Holding
+    // the device angled to read it satisfies the threshold continuously,
+    // so a level test paged every PAGE_TURN_COOLDOWN_MS (twice a second)
+    // for as long as you held it — which is also why this used to look
+    // "stuck on the last story": paging was bounded at the end, so
+    // holding the tilt raced there and stopped. The tilt has to come back
+    // near level to re-arm.
+    if (fabsf(pitchSin) < PAGE_TILT_RELEASE) tiltArmed = true;
+    if (tiltArmed && now - lastPageTurnMs > PAGE_TURN_COOLDOWN_MS) {
+      int direction = 0;
+      if (pitchSin > PAGE_TILT_THRESHOLD) direction = +1;
+      else if (pitchSin < -PAGE_TILT_THRESHOLD) direction = -1;
+      if (direction) {
+        tiltArmed = false;
+        rotateNews(direction);
         lastPageTurnMs = now;
         lastInteractionMs = now;
         drawNewsPage();
       }
+    }
+    // Temporary: the news view was reported as never advancing, and every
+    // path that could explain it reads correct on inspection. Print the
+    // actual state rather than guess again.
+    if (LOG_GYRO && now - lastNewsDebugMs > 5000) {
+      lastNewsDebugMs = now;
+      Serial.printf("[news] lines=%d perPage=%d offset=%d rotIn=%ldms idleIn=%ldms\n",
+                    (int)newsLines.size(), newsLinesPerPage, newsOffset,
+                    (long)NEWS_AUTO_ROTATE_MS - (long)(now - lastNewsRotateMs),
+                    (long)MESSAGE_TIMEOUT_MS - (long)(now - lastInteractionMs));
     }
     // Auto-advance. Deliberately does NOT touch lastInteractionMs: the
     // view should still time out to the idle clock while nobody's
@@ -1570,6 +1649,7 @@ void loop() {
     if (NEWS_AUTO_ROTATE_MS && (int)newsLines.size() > newsLinesPerPage &&
         now - lastNewsRotateMs > NEWS_AUTO_ROTATE_MS) {
       rotateNews(+1);
+      Serial.printf("[news] rotated -> offset %d of %d\n", newsOffset, (int)newsLines.size());
       drawNewsPage();
     }
     if (now - lastInteractionMs > MESSAGE_TIMEOUT_MS) {
@@ -1583,6 +1663,12 @@ void loop() {
       lastInteractionMs = now;
       layoutHeadlines();
       currentView = VIEW_NEWS;
+      // The tilt that opened the view is still being held, so disarm it —
+      // otherwise the same gesture immediately turns the first page. And
+      // start the rotate clock now, or the first auto-advance fires on the
+      // very next pass because lastNewsRotateMs is stale.
+      tiltArmed = false;
+      lastNewsRotateMs = now;
       drawNewsPage();
     } else if (now - lastInteractionMs > IDLE_SLEEP_MS) {
       currentView = VIEW_SLEEP;
